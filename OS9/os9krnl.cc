@@ -46,8 +46,8 @@ static int debug_syscall = 1;
  * An os9 string is terminated with highorder bit set
  * This helpful functions prints it out.
  */
-static void
-print_os9string(FILE *out,Byte *str)
+void
+print_os9string(FILE *out, Byte *str)
 {
     while(*str < 128)
         putc(*str++,out);
@@ -260,7 +260,7 @@ void os9::loadmodule(const char *filename,const char *parm)
 	 pc,u,dp,x,y,s);
 }
 
-static char *errmsg[] = {
+static const char *errmsg[] = {
 #include "errmsg.i"
 };
 
@@ -270,7 +270,7 @@ void os9::f_perr(void)
     // According to sysman, a holds the path number to write to,
     // but the shell never sets a.
     sprintf((char*)buf,"ERROR #%d %s\r",b,errmsg[b]);
-    paths[2]->writeln(buf,strlen((char*)buf));
+    paths[2]->writeln(buf, (int)strlen((char*)buf));
 }
 
 /*

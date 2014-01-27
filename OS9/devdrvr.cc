@@ -32,6 +32,10 @@ fdes::fdes()
     usecount=0;
 }
 
+fdes::~fdes()
+{
+}
+
 int fdes::close()
 {
     usecount--;
@@ -58,7 +62,7 @@ int fdes::seek(int offset)
  * The methods expect pathnames that are relative to the mount pount
  * and with out leading slash.
  */
-devdrvr::devdrvr(char *mntpnt)
+devdrvr::devdrvr(const char *mntpnt)
 {
     mntpoint = new char[strlen(mntpnt)+1];
     strcpy(mntpoint,mntpnt);

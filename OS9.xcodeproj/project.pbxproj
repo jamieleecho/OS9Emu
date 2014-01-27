@@ -7,7 +7,17 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		52FCEA9E1891EB87004CB2E1 /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 52FCEA9D1891EB87004CB2E1 /* main.cpp */; };
+		52783E5E1894444E000E716E /* devdrvr.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E451894444E000E716E /* devdrvr.cc */; };
+		52783E5F1894444E000E716E /* devunix.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E471894444E000E716E /* devunix.cc */; };
+		52783E621894444E000E716E /* mc6809.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E4D1894444E000E716E /* mc6809.cc */; };
+		52783E631894444E000E716E /* mc6809in.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E4F1894444E000E716E /* mc6809in.cc */; };
+		52783E641894444E000E716E /* mc6850.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E501894444E000E716E /* mc6850.cc */; };
+		52783E651894444E000E716E /* misc.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E521894444E000E716E /* misc.cc */; };
+		52783E661894444E000E716E /* os9crc24.c in Sources */ = {isa = PBXBuildFile; fileRef = 52783E551894444E000E716E /* os9crc24.c */; };
+		52783E671894444E000E716E /* os9krnl.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E561894444E000E716E /* os9krnl.cc */; };
+		52783E681894444E000E716E /* os9l1.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E581894444E000E716E /* os9l1.cc */; };
+		52783E691894444E000E716E /* term.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E591894444E000E716E /* term.cc */; };
+		52783E6A1894444E000E716E /* usim.cc in Sources */ = {isa = PBXBuildFile; fileRef = 52783E5C1894444E000E716E /* usim.cc */; };
 		52FCEAA01891EB87004CB2E1 /* OS9.1 in CopyFiles */ = {isa = PBXBuildFile; fileRef = 52FCEA9F1891EB87004CB2E1 /* OS9.1 */; };
 /* End PBXBuildFile section */
 
@@ -25,8 +35,30 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		52783E451894444E000E716E /* devdrvr.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = devdrvr.cc; sourceTree = "<group>"; };
+		52783E461894444E000E716E /* devdrvr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = devdrvr.h; sourceTree = "<group>"; };
+		52783E471894444E000E716E /* devunix.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = devunix.cc; sourceTree = "<group>"; };
+		52783E481894444E000E716E /* devunix.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = devunix.h; sourceTree = "<group>"; };
+		52783E491894444E000E716E /* errcodes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = errcodes.h; sourceTree = "<group>"; };
+		52783E4A1894444E000E716E /* errmsg.i */ = {isa = PBXFileReference; explicitFileType = text.css; fileEncoding = 4; path = errmsg.i; sourceTree = "<group>"; };
+		52783E4C1894444E000E716E /* machdep.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = machdep.h; sourceTree = "<group>"; };
+		52783E4D1894444E000E716E /* mc6809.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mc6809.cc; sourceTree = "<group>"; };
+		52783E4E1894444E000E716E /* mc6809.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = mc6809.h; sourceTree = "<group>"; };
+		52783E4F1894444E000E716E /* mc6809in.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mc6809in.cc; sourceTree = "<group>"; };
+		52783E501894444E000E716E /* mc6850.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = mc6850.cc; sourceTree = "<group>"; };
+		52783E511894444E000E716E /* mc6850.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = mc6850.h; sourceTree = "<group>"; };
+		52783E521894444E000E716E /* misc.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = misc.cc; sourceTree = "<group>"; };
+		52783E531894444E000E716E /* misc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = misc.h; sourceTree = "<group>"; };
+		52783E551894444E000E716E /* os9crc24.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = os9crc24.c; sourceTree = "<group>"; };
+		52783E561894444E000E716E /* os9krnl.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = os9krnl.cc; sourceTree = "<group>"; };
+		52783E571894444E000E716E /* os9krnl.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = os9krnl.h; sourceTree = "<group>"; };
+		52783E581894444E000E716E /* os9l1.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = os9l1.cc; sourceTree = "<group>"; };
+		52783E591894444E000E716E /* term.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = term.cc; sourceTree = "<group>"; };
+		52783E5A1894444E000E716E /* term.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = term.h; sourceTree = "<group>"; };
+		52783E5B1894444E000E716E /* typedefs.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = typedefs.h; sourceTree = "<group>"; };
+		52783E5C1894444E000E716E /* usim.cc */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = usim.cc; sourceTree = "<group>"; };
+		52783E5D1894444E000E716E /* usim.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = usim.h; sourceTree = "<group>"; };
 		52FCEA9A1891EB87004CB2E1 /* OS9 */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = OS9; sourceTree = BUILT_PRODUCTS_DIR; };
-		52FCEA9D1891EB87004CB2E1 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
 		52FCEA9F1891EB87004CB2E1 /* OS9.1 */ = {isa = PBXFileReference; lastKnownFileType = text.man; path = OS9.1; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -60,7 +92,29 @@
 		52FCEA9C1891EB87004CB2E1 /* OS9 */ = {
 			isa = PBXGroup;
 			children = (
-				52FCEA9D1891EB87004CB2E1 /* main.cpp */,
+				52783E451894444E000E716E /* devdrvr.cc */,
+				52783E461894444E000E716E /* devdrvr.h */,
+				52783E471894444E000E716E /* devunix.cc */,
+				52783E481894444E000E716E /* devunix.h */,
+				52783E491894444E000E716E /* errcodes.h */,
+				52783E4A1894444E000E716E /* errmsg.i */,
+				52783E4C1894444E000E716E /* machdep.h */,
+				52783E4D1894444E000E716E /* mc6809.cc */,
+				52783E4E1894444E000E716E /* mc6809.h */,
+				52783E4F1894444E000E716E /* mc6809in.cc */,
+				52783E501894444E000E716E /* mc6850.cc */,
+				52783E511894444E000E716E /* mc6850.h */,
+				52783E521894444E000E716E /* misc.cc */,
+				52783E531894444E000E716E /* misc.h */,
+				52783E551894444E000E716E /* os9crc24.c */,
+				52783E561894444E000E716E /* os9krnl.cc */,
+				52783E571894444E000E716E /* os9krnl.h */,
+				52783E581894444E000E716E /* os9l1.cc */,
+				52783E591894444E000E716E /* term.cc */,
+				52783E5A1894444E000E716E /* term.h */,
+				52783E5B1894444E000E716E /* typedefs.h */,
+				52783E5C1894444E000E716E /* usim.cc */,
+				52783E5D1894444E000E716E /* usim.h */,
 				52FCEA9F1891EB87004CB2E1 /* OS9.1 */,
 			);
 			path = OS9;
@@ -117,7 +171,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				52FCEA9E1891EB87004CB2E1 /* main.cpp in Sources */,
+				52783E671894444E000E716E /* os9krnl.cc in Sources */,
+				52783E651894444E000E716E /* misc.cc in Sources */,
+				52783E641894444E000E716E /* mc6850.cc in Sources */,
+				52783E691894444E000E716E /* term.cc in Sources */,
+				52783E621894444E000E716E /* mc6809.cc in Sources */,
+				52783E6A1894444E000E716E /* usim.cc in Sources */,
+				52783E681894444E000E716E /* os9l1.cc in Sources */,
+				52783E661894444E000E716E /* os9crc24.c in Sources */,
+				52783E5E1894444E000E716E /* devdrvr.cc in Sources */,
+				52783E5F1894444E000E716E /* devunix.cc in Sources */,
+				52783E631894444E000E716E /* mc6809in.cc in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -225,6 +289,7 @@
 				52FCEAA51891EB87004CB2E1 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};

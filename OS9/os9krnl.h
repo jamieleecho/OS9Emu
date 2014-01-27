@@ -72,8 +72,8 @@ private:
 		void i_write();
 		void i_deletex(int);
 		void loadrcfile();
-		char *findpathseg(char *, char *);
-		char *findpath(char *,bool );
+		const char *findpathseg(const char *, char *);
+		const char *findpath(const char *, bool );
 		Word getpath(Byte*,Byte *,int);
 		devdrvr *find_device(Byte *);
 };

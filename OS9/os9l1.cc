@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
     p = parm;
  
     for (i = 2; i < argc; i++) {
-	j = strlen(argv[i]);
+	j = (int)strlen(argv[i]);
 	strcpy(p, argv[i]);
 	size += j;
 	p += j;

@@ -29,8 +29,8 @@ class os9dentry {
   unsigned char res[1];
   unsigned char lsn[3];
 
-  void set(char *the_name, int n) {
-    int len = strlen(the_name);
+  void set(const char *the_name, int n) {
+    size_t len = strlen(the_name);
     len = ((size_t)len <= sizeof(name)) ? len : sizeof(name);
     strncpy((char *)name, the_name, sizeof(name));
 
@@ -44,10 +44,10 @@ class os9dentry {
 
 class devunix: public devdrvr {
 public:
-    char *unixdir;
+    const char *unixdir;
 
-    devunix(char *,char *);
-    fdes *open(const char *,int,int);
+    devunix(const char *, const char *);
+    fdes *open(const char *, int, int);
     fdes *open(FILE*);
     int makdir(char *,int);
     int chdir (char *);
@@ -85,9 +85,9 @@ public:
 
 class devterm: public devdrvr {
 public:
-    char *device; /* The UNIX device it coresponds to -- like /dev/tty */
+    const char *device; /* The UNIX device it coresponds to -- like /dev/tty */
 
-    devterm(char *,char *);
+    devterm(const char *, const char *);
     fdes *open(const char *,int,int);
     fdes *open(FILE*);
 };
@@ -113,7 +113,7 @@ public:
  */
 class devpipe: public devdrvr {
 public:
-    devpipe(char *,char *);
+    devpipe(const char *, const char *);
     fdes *open(const char *,int,int);
     fdes *open(FILE*);
 };

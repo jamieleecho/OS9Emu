@@ -42,7 +42,7 @@ crc(unsigned char *start,int count,unsigned char *accum)
 {
     unsigned long crc;
 
-    crc = accum[0] << 16 + accum[1] << 8 + accum[2];
+    crc = (accum[0] << 16) + (accum[1] << 8) + accum[2];
     crc = compute_crc(crc,start,count);
     accum[0] = (crc >> 16) & 0xff;
     accum[1] = (crc >> 8) & 0xff;

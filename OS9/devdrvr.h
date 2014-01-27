@@ -37,6 +37,7 @@ public:
     int usecount;
     int errorcode;
     fdes();
+    virtual ~fdes();
     virtual int close();
     virtual int read(Byte *,int) = 0;
     virtual int readln(Byte *,int) = 0;
@@ -57,7 +58,7 @@ public:
     char *mntpoint;
     int errorcode;
 
-    devdrvr(char *);                 // Constructor
+    devdrvr(const char *);                 // Constructor
     virtual fdes *open(const char *,int,int);
     virtual int makdir(char *,int);
     virtual int chdir(char *);

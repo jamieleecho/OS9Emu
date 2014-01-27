@@ -236,6 +236,9 @@ void mc6809::execute(void)
 	    case indexed:
 	       fprintf(stderr,"In ");
 	       break;
+        case inherent:
+           fprintf(stderr,"Ih ");
+           break;
 	    }
 	}
 

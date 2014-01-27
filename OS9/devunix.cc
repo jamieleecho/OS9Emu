@@ -20,7 +20,6 @@
 extern "C" {
 #include <string.h>
 #include <stdio.h>
-  //#include <malloc.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -29,7 +28,6 @@ extern "C" {
 #include "devdrvr.h"
 #include "devunix.h"
 
-static int debug_syscall = 0;
 
 static int
 u2o_attr(int umode)
@@ -66,7 +64,7 @@ o2u_attr(int omode)
  * Return the real file name of the segment or NULL
  * You can then append the segment to dir and try again
  */
-static char *findpathseg(char *dir,char *segment)
+static const char *findpathseg(const char *dir, const char *segment)
 {
     DIR *dirp;
     struct dirent *dp;
@@ -86,8 +84,8 @@ static char *findpathseg(char *dir,char *segment)
 
 static char *findpath(char *path,bool mustexist)
 {
-    char *endp,*endseg,*begseg;
-    char *dirp,*nseg;
+    char *endp, *endseg, *begseg;
+    const char *dirp, *nseg;
  
     endp = path + strlen(path);
  
@@ -107,7 +105,7 @@ static char *findpath(char *path,bool mustexist)
         if(endseg == NULL)
             endseg = endp;
         *endseg = '\0';
-        nseg = findpathseg(dirp,begseg);
+        nseg = findpathseg(dirp, begseg);
         if(endseg != endp && !nseg)
             return NULL;
         if(nseg)
@@ -184,7 +182,7 @@ void canonicalizePath(char *dst, char *path) {
 // The methods expect pathnames that are relative to the mount pount
 // and without leading slash.
 
-devunix::devunix(char *mntpnt,char *args) : devdrvr(mntpnt)
+devunix::devunix(const char *mntpnt, const char *args) : devdrvr(mntpnt)
 {
     unixdir = args;
 }
@@ -221,9 +219,6 @@ struct {
 } fileTable;
 
 
-static int rootID = fileTable.getID("/Users/jcho/OS9");
-
-
 /* Open a file
  * fixme: Go through the path to see if the path actually exists
  * fixme: Open in other modes than read
@@ -234,9 +229,7 @@ fdes *devunix::open(const char *path,int mode,int create)
     const char *umode;
 
     sprintf(buf,"%s%s",unixdir,path);
-    printf("%s", buf);
     canonicalizePath(buf, buf);
-    printf(":%s\n", buf);
 
     if (!findpath(buf,!create))
     {
@@ -365,9 +358,7 @@ int fdunix::close()
 
 int fdunix::read(Byte *buf, int size)
 {
-    int c;
-    printf("read(%d)\n", size);
-    c = fread((char*)buf,1,size,fp);
+    int c = (int)fread((char*)buf, 1, size, fp);
     if(c == 0)
     {
         errorcode = 211;
@@ -398,7 +389,7 @@ int fdunix::readln(Byte *buf, int size)
         if(c == '\r')
             break;
     }
-    y = p - buf;
+    y = (int)(p - buf);
     if(y == 0)
     {
         errorcode = 211;
@@ -453,7 +444,6 @@ int fdunix::seek(int offset)
 int fdunix::getstatus(int opcode,statusbuf *status)
 {
     struct stat statbuf;
-    printf("getstatus(%d)\n", opcode);
     switch (opcode)
     {
     case 0:  /* Read/Write PD Options */
@@ -603,7 +593,7 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
 /*
  * Methods for serial device such as tty and printer
  */
-devterm::devterm(char *mntpnt,char *args) : devdrvr(mntpnt)
+devterm::devterm(const char *mntpnt, const char *args) : devdrvr(mntpnt)
 {
     device = args;
 }
@@ -657,8 +647,7 @@ int fdterm::close()
 
 int fdterm::read(Byte *buf, int size)
 {
-    int c;
-    c = fread((char*)buf,1,size,fp);
+    int c = (int)fread((char*)buf, 1, size, fp);
     if(c == 0)
     {
         errorcode = 211;
@@ -673,7 +662,7 @@ int fdterm::read(Byte *buf, int size)
 int fdterm::readln(Byte *buf, int size)
 {
     Byte *p,*maxp;
-    int y,c;
+    int c;
  
     if(feof(fp))
     {
@@ -691,7 +680,7 @@ int fdterm::readln(Byte *buf, int size)
         if(c == '\r')
             break;
     }
-    y = p - buf;
+    int y = (int)(p - buf);
     if(y == 0)
     {
         errorcode = 211;
@@ -704,7 +693,9 @@ int fdterm::readln(Byte *buf, int size)
  */
 int fdterm::write(Byte *buf, int size)
 {
-    return fwrite((char*)buf,1,size,fp);
+    int val = (int)fwrite((char*)buf, 1, size, fp);
+    fflush(fp);
+    return val;
 }
 
 /*
@@ -724,6 +715,7 @@ int fdterm::writeln(Byte *buf, int size)
             break;
         }
     }
+    fflush(fp);
     return inx;
 }
 
@@ -779,11 +771,11 @@ int fdterm::setstatus(int opcode,statusbuf *status)
 /*
  * Methods for serial device such as tty and printer
  */
-devpipe::devpipe(char *mntpnt,char *args) : devdrvr(mntpnt)
+devpipe::devpipe(const char *mntpnt, const char *args) : devdrvr(mntpnt)
 {
 }
 
-fdes *devpipe::open(const char *path,int mode,int create)
+fdes *devpipe::open(const char *path, int mode, int create)
 {
     fdpipe *fd = new fdpipe;
 
@@ -821,8 +813,7 @@ int fdpipe::close()
 
 int fdpipe::read(Byte *buf, int size)
 {
-    int c;
-    c = fread((char*)buf,1,size,ifp);
+    int c = (int)fread((char*)buf, 1, size, ifp);
     if(c == 0)
     {
         errorcode = 211;
@@ -837,7 +828,7 @@ int fdpipe::read(Byte *buf, int size)
 int fdpipe::readln(Byte *buf, int size)
 {
     Byte *p,*maxp;
-    int y,c;
+    int c;
  
     if(feof(ifp))
     {
@@ -853,7 +844,7 @@ int fdpipe::readln(Byte *buf, int size)
         if(c == '\r')
             break;
     }
-    y = p - buf;
+    int y = (int)(p - buf);
     if(y == 0)
     {
         errorcode = 211;
@@ -864,7 +855,7 @@ int fdpipe::readln(Byte *buf, int size)
 
 int fdpipe::write(Byte *buf, int size)
 {
-    return ::write(filedes[1],(char*)buf,size);
+    return (int)::write(filedes[1], (char*)buf, size);
 }
 
 /*
@@ -879,7 +870,7 @@ int fdpipe::writeln(Byte *buf, int size)
         if(((char*)buf)[nl++] == '\r')
 	   break;
     }
-    return ::write(filedes[1],(char*)buf,nl);
+    return (int)::write(filedes[1], (char*)buf, nl);
 }
 
 int fdpipe::getstatus(int opcode,statusbuf *status)
