@@ -2,6 +2,6 @@
 <Workspace
    version = "1.0">
    <FileRef
-      location = "self:OS9.xcodeproj">
+      location = "self:/Users/jamie/coco/OS9Emu/os9emu.xcodeproj">
    </FileRef>
 </Workspace>

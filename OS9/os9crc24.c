@@ -22,7 +22,7 @@
 
 typedef long crc24;
 
-crc24 compute_crc(unsigned long crc, unsigned char *octets, int len)
+crc24 compute_crc(unsigned int crc, unsigned char *octets, int len)
 {
     int i;
 

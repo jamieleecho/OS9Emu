@@ -80,7 +80,7 @@ void USim::write(Word offset, Byte val)
 static Byte fread_byte(FILE *fp)
 {
 	char			str[3];
-	long			l;
+	int			l;
 
 	str[0] = fgetc(fp);
 	str[1] = fgetc(fp);

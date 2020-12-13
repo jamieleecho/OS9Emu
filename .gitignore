@@ -1,0 +1,7 @@
+*.swp
+*~
+OS9/*
+!OS9/**/
+!OS9/*.*
+OS9/*.o
+!OS9/Makefile

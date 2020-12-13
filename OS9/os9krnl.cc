@@ -447,10 +447,10 @@ void os9::f_prsnam()
 
 #define CRC24_POLY 0x800063L
 
-typedef long crc24;
+typedef int crc24;
 
 static crc24
-compute_crc(unsigned long crc, unsigned char *octets, int len)
+compute_crc(unsigned int crc, unsigned char *octets, int len)
 {
     int i;
 
@@ -467,12 +467,12 @@ compute_crc(unsigned long crc, unsigned char *octets, int len)
 
 void os9::f_crc()
 {
-    unsigned long tmpcrc;
+    unsigned int tmpcrc;
 
     tmpcrc = (memory[u] << 16) + (memory[u+1] << 8) + memory[u+2];
 
     if(debug_syscall)
-      fprintf(stderr,"'os9::f_crc: X=%04x Y=%04x DP=%02x\nU=%04x start=%lx\n",
+      fprintf(stderr,"'os9::f_crc: X=%04x Y=%04x DP=%02x\nU=%04x start=%x\n",
              x,y,dp,u,tmpcrc);
     tmpcrc = compute_crc(tmpcrc,&memory[x],(int)y);
     memory[u+0] = (tmpcrc >> 16) & 0xff;
