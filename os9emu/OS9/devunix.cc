@@ -481,6 +481,7 @@ int fdunix::getstatus(int opcode,statusbuf *status)
         case 14: /* Return Device name (32-bytes at [X]) */
             strcpy((char*) status->filler, driver->mntpoint);
             break;
+
         default:
             fprintf(stderr,"Getstat code %d not implemented\n",opcode);
             exit(1);
@@ -730,7 +731,7 @@ int fdterm::seek(int offset)
     return 0;
 }
 
-int fdterm::getstatus(int opcode,statusbuf *status)
+int fdterm::getstatus(int opcode, statusbuf *status)
 {
     switch (opcode)
     {
@@ -742,8 +743,12 @@ int fdterm::getstatus(int opcode,statusbuf *status)
             status->filler[0x0a] = 0x7f; /* DEL char */
             status->filler[0x0b] = 13; /* EOR char */
             status->filler[0x0c] = 4; /* EOF char ctrl-d */
-            
             break;
+            
+        case 14: /* Return Device name (32-bytes at [X]) */
+            strcpy((char*) status->filler, driver->mntpoint);
+            break;
+
         default:
             fprintf(stderr,"Getstat code %d not implemented\n",opcode);
             exit(1);

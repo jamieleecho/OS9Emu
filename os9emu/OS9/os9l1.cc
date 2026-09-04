@@ -98,8 +98,8 @@ int main(int argc, char *argv[])
         *(p - 1) = 0x0d;
         *p = 0x0;
     } else {
-        *p = 0x0d;
-        *p++ = 0x0;
+        *p++ = 0x0d;
+        *p = 0x0;
     }
     
     sys.loadmodule((argc==1)?"shell":argv[1],parm);
