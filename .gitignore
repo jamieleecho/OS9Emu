@@ -1,7 +1,16 @@
+# Editor
 *.swp
 *~
-OS9/*
-!OS9/**/
-!OS9/*.*
-OS9/*.o
-!OS9/Makefile
+
+# macOS
+.DS_Store
+
+# Build output
+*.o
+**/OS9/os9emu
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
