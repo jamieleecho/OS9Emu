@@ -273,15 +273,45 @@ void os9::loadmodule(const char *filename,const char *parm,int pages)
     int		val,i;
     Byte tmpfn[1024];
     
-    getpath((Byte*)filename, tmpfn, 1);
-    dev = find_device(tmpfn);
+    /*
+     * Where to look for the program named on our own command line.
+     *
+     * OS9 looks in the execution directory and nowhere else: F$Load opens with
+     * EXEC. set, and ioman starts a relative pathlist from the execution
+     * directory whenever that bit is on (L0349 in ioman.asm). A bare name is
+     * a module name and gets exactly that -- "os9emu echo" finds the echo in
+     * CMDS, and nothing else, however many other files called echo are lying
+     * around.
+     *
+     * A name with a "/" in it is a pathname, though, and "./prog" typed at a
+     * host shell means the prog here. We are the thing being typed at, and we
+     * have no procedure file to fall back on the way the OS9 shell does, so
+     * such a name gets the working directory tried after the execution one.
+     * An absolute path comes out the same both times round.
+     */
+    int trycwd = strchr(filename, '/') != NULL;
+
+    fd = NULL;
+    dev = NULL;
+    for(int xdir = 1; xdir >= 0 && !fd; xdir--)
+    {
+        devdrvr *trydev;
+
+        if(!xdir && !trycwd)
+            break;
+        getpath((Byte*)filename, tmpfn, xdir);
+        trydev = find_device(tmpfn);
+        if(!trydev)
+            continue;
+        dev = trydev;
+        trydev->errorcode = 0;
+        fd = trydev->open((char*)&tmpfn[strlen(trydev->mntpoint)], 1, 0);
+    }
     if (!dev)
     {
         sys_error(221);
         return;
     }
-    filename = (char*)&tmpfn[strlen(dev->mntpoint)];
-    fd = dev->open(filename, 1, 0);
     if (!fd) {
         b = 216;
         f_perr();
@@ -682,7 +712,7 @@ void os9::reclaim_modules()
 void os9::f_link()
 {
     char name[64];
-    Word i, n;
+    Word i, n, entry = x;
     int slot;
 
     // A module name, not a pathlist -- parse it where it stands.
@@ -695,13 +725,19 @@ void os9::f_link()
         name[i] = memory[(Word)(x + i)] & 0x7f;
     name[i] = '\0';
 
-    // X is left where F$PrsNam put it -- at the start of the name, past any
-    // leading slash. The shell reads it back to open the command it just
-    // failed to link, so moving it past the name loses the name.
-
     slot = findmodule(name);
     if(slot < 0)
     {
+        /*
+         * Hand the caller back the X it gave us. Level 1's FLink only writes
+         * R$X on the way out with a module; on E$MNF the caller's registers
+         * are its own. The shell relies on that: when a link fails it opens
+         * the name from wherever X now points, so anything we consumed here
+         * is lost to it -- and F$PrsNam consumes the leading "/", which is
+         * how "/dd/BIN/prog" arrived at I$Open as a relative "dd/BIN/prog"
+         * and got the execution directory pasted in front of it.
+         */
+        x = entry;
         if(debug_syscall)
             fprintf(stderr,"'os9::f_link: %s not loaded\n",name);
         sys_error(E_MNF);
