@@ -31,3 +31,12 @@ errs 'load echo\nlink echo\nunlink echo\nlink echo\nunlink echo\nunlink echo\nli
 
 echo "--- a module loaded by one command, unlinked by another"
 errs 'load echo\nunlink echo\nlink echo\n'
+
+# A module file may hold several merged -- the Level 2 CMDS/shell is nine --
+# and F$Load loads all of them, not just the one whose header comes first.
+# copy is the second here, so linking it says whether the load walked the
+# file, and the offset it was found at says whether the directory remembered
+# where in the file to read it back from.
+echo "--- every module of a merged file, not just the first"
+$OS9 merge /dd/CMDS/echo /dd/CMDS/copy > CMDS/pair
+errs 'load pair\nlink echo\nlink copy\nunlink copy\nunlink copy\nlink copy\n'
