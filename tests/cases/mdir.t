@@ -11,6 +11,11 @@
 # would have to be resident in the asking process for it to find any -- so
 # there the same commands print a heading over nothing, which is NAME.out.
 #
+# The shell and the mdir it forked are in the listing before anything is
+# loaded at all, because a running program is a resident module: the kernel
+# puts it in the directory when it loads it and takes the link back when the
+# process ends. Two shells running would show Shell with a use count of two.
+#
 # The block column is a real address in the fake memory the directory is
 # expressed in, so it counts from whatever is already resident -- the shell's
 # own program holds the first blocks going.

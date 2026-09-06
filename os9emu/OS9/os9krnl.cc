@@ -177,8 +177,7 @@ struct sharedproc {
     int   state;
     int   pages;		// data area size, in 256-byte pages
     unsigned sp;		// stack pointer, as at its last system call
-    char  module[32];		// the primary module
-    struct sharedimg img;	// and where to read that back from
+    char  module[32];		// the primary module, as the directory holds it
 };
 
 struct sharedsys {
@@ -293,28 +292,23 @@ static struct sharedmod *shared_find(const char *name)
  * keep is not an error: the module is in the loader's own memory either way,
  * and only another process loses by it.
  */
-static void shared_add(const char *name, const char *path, long off, int size)
+static void shared_add_locked(const char *name, const char *path,
+                              long off, int size)
 {
     struct sharedmod *e;
-    int held = shared_lock(), i;
+    int i;
 
     if(!shmods)
         return;
     if((e = shared_find(name)) == NULL)
     {
         if(path == NULL)
-        {
-            shared_unlock(held);
             return;
-        }
         for(i = 0; i < SHMODS; i++)
             if(shmods->ent[i].links == 0)
                 break;
-        if(i == SHMODS || strlen(path) >= sizeof(e->img.path))
-        {
-            shared_unlock(held);
+        if(i == SHMODS || strlen(path) >= sizeof(shmods->ent[0].img.path))
             return;
-        }
         e = &shmods->ent[i];
         snprintf(e->name, sizeof(e->name), "%s", name);
         snprintf(e->img.path, sizeof(e->img.path), "%s", path);
@@ -326,6 +320,13 @@ static void shared_add(const char *name, const char *path, long off, int size)
         shmods->count++;
     }
     e->links++;
+}
+
+static void shared_add(const char *name, const char *path, long off, int size)
+{
+    int held = shared_lock();
+
+    shared_add_locked(name, path, off, size);
     shared_unlock(held);
 }
 
@@ -359,14 +360,13 @@ static int shared_path(const char *name, char *path, size_t pathsize, long *off)
  * unlink as often as it linked. Minus one means there is no shared directory
  * to have counted in, and the caller should fall back to its own tally.
  */
-static int shared_release(const char *name)
+static int shared_release_locked(const char *name)
 {
     struct sharedmod *e;
-    int held, left = -1;
+    int left = -1;
 
-    if(!shmods)
+    if(!shmods || name == NULL || name[0] == '\0')
         return -1;
-    held = shared_lock();
     if((e = shared_find(name)) != NULL)
     {
         if((left = --e->links) <= 0)
@@ -379,8 +379,41 @@ static int shared_release(const char *name)
             shmods->count--;
         }
     }
+    return left;
+}
+
+static int shared_release(const char *name)
+{
+    int held, left;
+
+    if(!shmods)
+        return -1;
+    held = shared_lock();
+    left = shared_release_locked(name);
     shared_unlock(held);
     return left;
+}
+
+// The blocks a module's entry holds, for a caller that has to name it in a
+// DAT image -- which is what a process descriptor does with the program the
+// process is running.
+static int shared_blocks(const char *name, int *blk, int *nblk)
+{
+    struct sharedmod *e;
+    int held, found = 0;
+
+    *blk = *nblk = 0;
+    if(!shmods || name == NULL || name[0] == '\0')
+        return 0;
+    held = shared_lock();
+    if((e = shared_find(name)) != NULL)
+    {
+        *blk = e->img.blk;
+        *nblk = e->img.nblk;
+        found = 1;
+    }
+    shared_unlock(held);
+    return found;
 }
 
 /*
@@ -401,10 +434,10 @@ static int shared_copy(struct sharedmod *out, int max)
     return n;
 }
 
-// Which image is holding a block of the fake memory. It is the question
-// F$CpyMem is really asking when it is handed a DAT image to read through --
-// and the answer may be a module in the directory or the program a process is
-// running, since procs asks it the same way mdir does.
+// Which module is holding a block of the fake memory. It is the question
+// F$CpyMem is really asking when it is handed a DAT image to read through,
+// and procs asks it of a process's program exactly as mdir asks it of a
+// module in the directory -- because a running program is one.
 static int shared_block(int blk, struct sharedimg *out)
 {
     struct sharedimg *g;
@@ -413,20 +446,11 @@ static int shared_block(int blk, struct sharedimg *out)
     if(!shmods || blk < SYSBLKS)
         return 0;
     held = shared_lock();
-    for(i = 0; i < SHMODS + SHPROCS && !found; i++)
+    for(i = 0; i < SHMODS && !found; i++)
     {
-        if(i < SHMODS)
-        {
-            if(shmods->ent[i].links <= 0)
-                continue;
-            g = &shmods->ent[i].img;
-        }
-        else
-        {
-            if(!shmods->proc[i - SHMODS].used)
-                continue;
-            g = &shmods->proc[i - SHMODS].img;
-        }
+        if(shmods->ent[i].links <= 0)
+            continue;
+        g = &shmods->ent[i].img;
         if(g->nblk > 0 && blk >= g->blk && blk < g->blk + g->nblk)
         {
             *out = *g;
@@ -458,7 +482,9 @@ static void shproc_reap(void)		// with the lock held
             continue;
         if(kill(p->host, 0) == 0 || errno != ESRCH)
             continue;
-        blocks_free(p->img.blk, p->img.nblk);
+        // Its link to the program it was running goes with it. A process
+        // that was killed never got to give it back itself.
+        shared_release_locked(p->module);
         memset(p, 0, sizeof(*p));
     }
 }
@@ -510,14 +536,25 @@ static void shproc_free(int id)
         return;
     held = shared_lock();
     p = &shmods->proc[id - 1];
-    blocks_free(p->img.blk, p->img.nblk);
+    shared_release_locked(p->module);
     memset(p, 0, sizeof(*p));
     shared_unlock(held);
 }
 
-// What a process is running, once it knows: the name for procs to print and
-// the file to read the header and that name back out of.
-static void shproc_setimg(int id, const char *module, const char *path,
+/*
+ * What a process is now running.
+ *
+ * A real kernel puts the program in the module directory when it loads it and
+ * takes the link back when the process ends, so a running program is a
+ * resident module like any other: mdir lists it, and a program can link
+ * itself -- printerr does exactly that, to stay resident. Ours is the same
+ * entry the directory would have made for a "load", with this process holding
+ * one of its links, so two processes running the same program share it.
+ *
+ * F$Chain comes back through here, so whatever we were running before is
+ * released first.
+ */
+static void shproc_setmod(int id, const char *module, const char *path,
                           long off, int size, int pages)
 {
     struct sharedproc *p;
@@ -527,13 +564,9 @@ static void shproc_setimg(int id, const char *module, const char *path,
         return;
     held = shared_lock();
     p = &shmods->proc[id - 1];
-    blocks_free(p->img.blk, p->img.nblk);
+    shared_release_locked(p->module);
+    shared_add_locked(module, path, off, size);
     snprintf(p->module, sizeof(p->module), "%s", module);
-    snprintf(p->img.path, sizeof(p->img.path), "%s", path);
-    p->img.off = off;
-    p->img.size = size;
-    p->img.blk = blocks_alloc(size);
-    p->img.nblk = p->img.blk ? (size + BLKSIZE - 1) / BLKSIZE : 0;
     p->pages = pages;
     shared_unlock(held);
 }
@@ -933,7 +966,7 @@ void os9::loadmodule(const char *filename,const char *parm,int pages)
         char who[64];
 
         if(modname(STARTPROG, who, sizeof(who)))
-            shproc_setimg(myproc, who, (const char *)tmpfn, 0, modsize,
+            shproc_setmod(myproc, who, (const char *)tmpfn, 0, modsize,
                           (uppermem - lowermem) >> 8);
     }
 
@@ -1351,7 +1384,7 @@ void os9::f_gprdsc()
     struct sharedproc p;
     Byte pd[PD_SIZE];
     Word buf = x;
-    int i;
+    int i, blk, nblk;
 
     if(!shproc_copy(a, &p))
     {
@@ -1374,8 +1407,11 @@ void os9::f_gprdsc()
     pd[0x11] = 0;				// P$PModul: a module of ours
     pd[0x12] = 0;				// starts its first block
 
-    for(i = 0; i < p.img.nblk && i < 32; i++)	// P$DATImg
-        pd[0x40 + i * 2 + 1] = (Byte)(p.img.blk + i);
+    // P$DATImg: the blocks the program it is running holds, which is the
+    // entry the module directory has for it.
+    shared_blocks(p.module, &blk, &nblk);
+    for(i = 0; i < nblk && i < 32; i++)
+        pd[0x40 + i * 2 + 1] = (Byte)(blk + i);
 
     for(i = 0; i < PD_SIZE; i++)
         memory[(Word)(buf + i)] = pd[i];
