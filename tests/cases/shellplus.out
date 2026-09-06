@@ -1,0 +1,14 @@
+--- one command
+
+hello
+--- several, in order
+
+one
+two
+three
+--- output redirected, then read back
+
+redirected
+--- a command that is not there, then one that is
+
+still here

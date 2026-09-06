@@ -31,6 +31,7 @@ extern "C" {
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <poll.h>
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
@@ -65,9 +66,40 @@ os9config os9cfg = { NULL, "/dd", "/dd/CMDS", 0, EOL_AUTO, 0 };
 #define MEMSLACK 0x0400
 
 
+/*
+ * The two signal codes we can carry between processes. S$Kill cannot be
+ * caught, and S$Wake only ends a sleep. The rest -- S$Abort, S$Intrpt and the
+ * codes a program picks for itself, like the $0B shellplus asks a keypress to
+ * send -- only ever travel within one process, where SS_SSig raises them.
+ */
+enum { S_Kill = 0, S_Wake = 1 };
+
 #define debug_syscall (os9cfg.trace)
 
 static size_t MAX_PATHLEN = 1024;
+
+/*
+ * Is there input waiting on a host descriptor? End of file counts: a read
+ * there returns at once, which is what "ready" means to the caller.
+ */
+static int fd_ready(int fd)
+{
+    struct pollfd pfd;
+
+    if(fd < 0)
+        return 0;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    return poll(&pfd, 1, 0) > 0 && pfd.revents != 0;
+}
+
+/*
+ * S$Wake arrives as SIGUSR1 and has nothing to do but interrupt a poll().
+ */
+static void wake_handler(int)
+{
+}
 
 /*
  * An os9 string is terminated with highorder bit set
@@ -132,6 +164,9 @@ os9::os9()
     {
         paths[inx] = NULL;
     }
+    for(inx=0; inx < DESMAX; inx++)
+        ssig[inx] = 0;
+    icpt_pc = icpt_u = 0;
     dev_end = 0;
     pid_end = 0;
     mod_end = 0;
@@ -157,6 +192,20 @@ void os9::init()
     snprintf(cxd, sizeof(cxd), "%s", os9cfg.execdir);
 
     loadrcfile();
+
+    /*
+     * S$Wake arrives from another process as SIGUSR1, and all it has to do is
+     * break the poll() a sleeping process is sitting in. No SA_RESTART, or it
+     * would not even do that.
+     */
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = wake_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGUSR1, &sa, NULL);
+    }
 
     // Set up some PIDs This process is hardcoded to PID #1
     pids[0] = getppid();
@@ -352,9 +401,14 @@ void os9::loadmodule(const char *filename,const char *parm,int pages)
     lowermem = (STARTPROG + modsize + 0xff) & 0xff00;
 
     // A new program owns the address space, so whatever the last one had
-    // loaded goes with it.
+    // loaded goes with it -- and so do its intercept routine and any signal a
+    // path still owed it. The paths stay open across a fork; the process that
+    // registered for the signal does not.
     mod_end = 0;
     modtop = MEMTOP;
+    icpt_pc = icpt_u = 0;
+    for(i = 0; i < DESMAX; i++)
+        ssig[i] = 0;
 
     /*
      * F$Fork's B register carries the data area size the caller wants, in
@@ -526,16 +580,18 @@ void os9::f_wait()
 }
 
 /*
- * f_sleep:
+ * F$Sleep. X = 0 sleeps until a signal arrives -- which is how a shell waits
+ * for a keystroke it has asked SS_SSig to tell it about. X = 1 gives up the
+ * timeslice, and anything else is a tick count.
+ *
+ * This used to be wait() for a child process, which returns at once when
+ * there are none: shellplus asks for the endless sleep and got a busy loop.
  */
 void os9::f_sleep()
 {
     if(x == 1)
-        return; // Same as giving up the timeslice.
-    if(x == 0)
-        wait((int*)0);
-    else
-        sleep(x / 100);
+        return;
+    wait_signal(x == 0 ? -1 : (x / 100) * 1000);
 }
 
 /*
@@ -638,13 +694,125 @@ void os9::f_send()
         sys_error(E_IPrcID);
         return;
     }
-    if(b == 0)			// S$Kill
+    if(b == S_Kill)
     {
         if(kill(pids[slot], SIGTERM) == -1)
             sys_error(E_IPrcID);
     }
-    // S$Wake and the keyboard signals have nothing to wake here: a sleeping
-    // process is inside nanosleep(), and returns on its own.
+    else if(b == S_Wake)	// wake a process out of F$Sleep
+    {
+        if(kill(pids[slot], SIGUSR1) == -1)
+            sys_error(E_IPrcID);
+    }
+    // The rest of the signal codes carry meaning we have nowhere to put: a
+    // host signal cannot bring the code with it, and the module directory
+    // each process keeps is its own. See #1.
+}
+
+/*
+ * F$Icpt: X names the routine to enter when a signal arrives and U the memory
+ * pointer to hand it. X = 0 takes the intercept away again.
+ */
+void os9::f_icpt()
+{
+    icpt_pc = x;
+    icpt_u  = u;
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::f_icpt: routine %04x u=%04x\n",icpt_pc,icpt_u);
+}
+
+/*
+ * Deliver a signal the way OS9 does. The process's registers go onto its own
+ * stack as an ordinary interrupt frame and we vector to the intercept routine
+ * with the signal code in B and its memory pointer in U. The routine ends in
+ * RTI, which puts the frame back and carries on from wherever we were -- the
+ * instruction after the system call that was interrupted.
+ *
+ * Nothing to vector to means nothing happens. A real system would kill the
+ * process for most codes; here the callers all want a wake-up, and a program
+ * that never asked for an intercept still wants to be woken.
+ */
+int os9::deliver_signal(Byte code)
+{
+    if(icpt_pc == 0)
+        return 0;
+
+    cc.bit.e = 1;			// a whole frame, which is what RTI expects
+    s -= 2; write_word(s, pc);
+    s -= 2; write_word(s, u);
+    s -= 2; write_word(s, y);
+    s -= 2; write_word(s, x);
+    write(--s, dp);
+    write(--s, b);
+    write(--s, a);
+    write(--s, cc.all);
+
+    b  = code;
+    u  = icpt_u;
+    pc = icpt_pc;
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::signal %d to %04x\n",code,icpt_pc);
+    return 1;
+}
+
+/*
+ * Wait until a path we were asked to signal on has something to read, and
+ * deliver the signal when it does. A negative timeout waits indefinitely.
+ *
+ * This is the whole of our signalling: SS_SSig is the only thing that raises
+ * one from inside the process, and SIGUSR1 from F$Send the only thing that
+ * raises one from outside. Neither can arrive while the 6809 is between
+ * instructions, so both are collected here, where the program has asked to
+ * wait for them.
+ */
+int os9::wait_signal(int timeout)
+{
+    struct pollfd pfd[DESMAX];
+    int slot[DESMAX];
+    int n = 0, i;
+
+    for(i = 0; i < DESMAX; i++)
+    {
+        int fd;
+
+        if(ssig[i] == 0 || paths[i] == NULL)
+            continue;
+        if((fd = paths[i]->hostfd()) < 0)
+            continue;
+        pfd[n].fd = fd;
+        pfd[n].events = POLLIN;
+        pfd[n].revents = 0;
+        slot[n++] = i;
+    }
+
+    if(n == 0)
+    {
+        /*
+         * Nothing registered that could wake us. A timed sleep is just slept.
+         * An endless one would hang the emulator with no way out, so wait a
+         * little and let the caller come round again -- which idles where it
+         * used to spin, and still returns if a signal arrives meanwhile.
+         */
+        poll(NULL, 0, timeout < 0 ? 100 : timeout);
+        return 0;
+    }
+
+    if(poll(pfd, n, timeout) <= 0)
+        return 0;			// timed out, or SIGUSR1 woke us
+
+    for(i = 0; i < n; i++)
+    {
+        if(pfd[i].revents == 0)
+            continue;
+        // A driver sends its SS_SSig signal once and forgets the request; the
+        // caller sets it up again next time round its loop.
+        Byte code = ssig[slot[i]];
+        ssig[slot[i]] = 0;
+        return deliver_signal(code);
+    }
+    return 0;
 }
 
 /*
@@ -1132,10 +1300,36 @@ void os9::i_setstt()
             break;
     }
 
+    Byte path = a, code = (Byte)(x & 0xff);
+    int opcode = b;
+
     paths[a]->errorcode = 0;
-    paths[a]->setstatus((int)b,&statbuf);
+    paths[a]->setstatus(opcode,&statbuf);
     if(paths[a]->errorcode)
+    {
         sys_error(paths[a]->errorcode);
+        return;
+    }
+
+    /*
+     * Which process to signal is not something a driver here can know, so the
+     * two calls that ask for one are answered by the kernel. SS_SSig asks for
+     * a signal when input turns up on this path -- X carries the code to send
+     * -- and SS_Relea takes the request away again.
+     */
+    if(opcode == SS_SSig)
+    {
+        ssig[path] = code;
+        // A driver whose input is already waiting sends the signal there and
+        // then rather than holding on to the request (RSendSig in mc6850.asm).
+        if(fd_ready(paths[path]->hostfd()))
+        {
+            ssig[path] = 0;
+            deliver_signal(code);
+        }
+    }
+    else if(opcode == SS_Relea)
+        ssig[path] = 0;
 }
 
 /*
@@ -1415,9 +1609,8 @@ void os9::swi2(void)
         case 0x08:		// F$Send
             f_send();
             break;
-        case 0x09:
-            if(debug_syscall)
-                fprintf(stderr,"'os9::Set intercept trap\n");
+        case 0x09:		// F$Icpt
+            f_icpt();
             break;
         case 0x0a:
             f_sleep();

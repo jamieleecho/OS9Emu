@@ -51,6 +51,17 @@ private:
     int modtop;
     pid_t pids[32]; // Mapping of Proces identifiers
     int pid_end;
+
+    /*
+     * Signals. F$Icpt names a routine to vector to when one arrives, and
+     * SS_SSig asks a path to send one when input turns up there -- which is
+     * how a shell waits for a keystroke without blocking in a read. The
+     * driver in a real system does the sending; here the kernel does, since
+     * it is the only part of us that knows what process it is talking to.
+     */
+    Word icpt_pc;		// intercept routine, or 0 for none
+    Word icpt_u;		// the memory pointer to hand it in U
+    Byte ssig[DESMAX];		// signal a path owes us, 0 for none
     
 public:
     void     init();
@@ -73,6 +84,9 @@ private:
     void f_crc();
     void f_fork();
     void f_send();
+    void f_icpt();
+    int  deliver_signal(Byte);
+    int  wait_signal(int);
     void f_id();
     void f_link();
     int  modname(Word base, char *out, size_t outsz);

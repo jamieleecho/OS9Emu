@@ -92,6 +92,9 @@ public:
     void devname(statusbuf *);		// SS_DevNm, the same for every device
     virtual int seek(int);
     virtual int isdir() { return 0; }	// only a directory path says yes
+    // The host descriptor behind this path, or -1 if there is nothing to wait
+    // on. SS_SSig is what asks: it wants to know when input turns up.
+    virtual int hostfd() { return -1; }
     virtual int write(Byte *,int) = 0;
     virtual int writeln(Byte *,int) = 0;
 };
