@@ -73,6 +73,9 @@ static void usage(FILE *out, int status)
 "                      the same thing the shell's \"prog #32k\" overrides\n"
 "  -e, --eol MODE      line endings on standard output: auto (default; CR LF\n"
 "                      to a terminal, bare CR otherwise), crlf, or cr\n"
+"  -c, --cols N        screen width to report to programs, instead of asking\n"
+"                      the terminal. Either way it is capped at 80: no OS-9\n"
+"                      terminal was wider and the utilities assume it\n"
 "  -V, --version       print the version and exit\n"
 "  -h, --help          print this message and exit\n"
 "\n"
@@ -104,6 +107,7 @@ int main(int argc, char *argv[])
             !strcmp(a, "-w") || !strcmp(a, "--workdir") ||
             !strcmp(a, "-x") || !strcmp(a, "--execdir") ||
             !strcmp(a, "-e") || !strcmp(a, "--eol") ||
+            !strcmp(a, "-c") || !strcmp(a, "--cols") ||
             !strcmp(a, "-m") || !strcmp(a, "--mem")) {
             if (argi + 1 >= argc) {
                 fprintf(stderr, "os9emu: %s needs a value\n", a);
@@ -141,6 +145,16 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "os9emu: --eol wants auto, cr or crlf\n");
                 return EXIT_FAILURE;
             }
+        }
+        else if (!strcmp(a, "-c") || !strcmp(a, "--cols")) {
+            char *end;
+            long n = strtol(val, &end, 0);
+
+            if (end == val || *end != '\0' || n <= 0) {
+                fprintf(stderr, "os9emu: --cols wants a column count\n");
+                return EXIT_FAILURE;
+            }
+            os9cfg.cols = (int)n;
         }
         else if (!strcmp(a, "--debug"))
             os9cfg.trace++;

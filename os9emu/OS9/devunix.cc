@@ -1465,6 +1465,18 @@ int fdterm::seek(int offset)
 }
 
 /*
+ * The widest screen an OS-9 utility is built for. No OS-9 terminal was wider
+ * than this, and the utilities take it as given: dir(1) lays a line out in a
+ * buffer and then writes a fixed 80 bytes of it, so told the truth about a
+ * 120-column host window it drops every name that falls past the eightieth
+ * column -- silently, because those names are simply never written. Its own
+ * check for the buffer filling up cannot save it: `cmpx #$0090` compares an
+ * absolute address, so it only fires for a process whose data area sits at
+ * $0000, and ours are at $0400.
+ */
+#define MAXCOLS 80
+
+/*
  * How wide and tall the terminal is. A program that formats in columns -- dir,
  * procs, mdir -- asks before it prints. Ask the real terminal if there is one,
  * otherwise answer with the size OS-9 assumed.
@@ -1473,12 +1485,16 @@ static void term_size(FILE *fp, int *cols, int *rows)
 {
     struct winsize ws;
 
-    *cols = 80;
+    *cols = MAXCOLS;
     *rows = 24;
-    if(fp && ioctl(fileno(fp), TIOCGWINSZ, &ws) == 0) {
+    if(os9cfg.cols > 0)
+        *cols = os9cfg.cols;
+    else if(fp && ioctl(fileno(fp), TIOCGWINSZ, &ws) == 0) {
         if(ws.ws_col) *cols = ws.ws_col;
         if(ws.ws_row) *rows = ws.ws_row;
     }
+    if(*cols > MAXCOLS)
+        *cols = MAXCOLS;
 }
 
 int fdterm::getstatus(int opcode, statusbuf *status)

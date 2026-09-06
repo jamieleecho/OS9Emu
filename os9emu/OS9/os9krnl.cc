@@ -40,7 +40,7 @@ extern "C" {
 #include "os9krnl.h"
 #include "errcodes.h"
 
-os9config os9cfg = { NULL, "/h0", "/h0/CMDS", 0, EOL_AUTO };
+os9config os9cfg = { NULL, "/h0", "/h0/CMDS", 0, EOL_AUTO, 0 };
 
 #define STARTPROG 0x00
 #define TOPMEM   0xf800
