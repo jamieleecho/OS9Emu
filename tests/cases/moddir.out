@@ -1,0 +1,14 @@
+--- link before anything has loaded it
+Exit code 221
+ERROR #221 - Module Not Found
+(nothing further)
+--- load, then link from the command after it
+(nothing further)
+--- unlink as often as you linked, and no more
+Exit code 221
+ERROR #221 - Module Not Found
+(nothing further)
+--- a module loaded by one command, unlinked by another
+Exit code 221
+ERROR #221 - Module Not Found
+(nothing further)
