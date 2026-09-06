@@ -329,9 +329,11 @@ static void shared_add(const char *name, const char *path, long off, int size)
     shared_unlock(held);
 }
 
-// Where a module another process loaded came from, so we can read it in too.
-// A NULL buffer just asks whether the directory has it at all.
-static int shared_path(const char *name, char *path, size_t pathsize)
+// Where a module another process loaded came from, so we can read it in too:
+// the file, and how far into it the module sits, since a file may hold
+// several merged and the one we want may not be the first. A NULL buffer just
+// asks whether the directory has it at all.
+static int shared_path(const char *name, char *path, size_t pathsize, long *off)
 {
     struct sharedmod *e;
     int held, found = 0;
@@ -343,6 +345,8 @@ static int shared_path(const char *name, char *path, size_t pathsize)
     {
         if(path != NULL)
             snprintf(path, pathsize, "%s", e->img.path);
+        if(off != NULL)
+            *off = e->img.off;
         found = 1;
     }
     shared_unlock(held);
@@ -1200,7 +1204,7 @@ void os9::f_unload()
     name[i] = '\0';
 
     slot = findmodule(name);
-    if(slot < 0 && !shared_path(name, NULL, 0))
+    if(slot < 0 && !shared_path(name, NULL, 0, NULL))
     {
         x = entry;
         sys_error(E_MNF);
@@ -1750,10 +1754,11 @@ void os9::f_link(int nonmapping)
          */
         Byte upath[512];
         Word base;
+        long off = 0;
 
-        if(shared_path(name, (char *)upath, sizeof(upath)))
+        if(shared_path(name, (char *)upath, sizeof(upath), &off))
         {
-            if((base = load_image(upath)) != 0 &&
+            if((base = load_image(upath, off)) != 0 &&
                (slot = register_module(base, name)) >= 0)
                 moddir[slot].links = 0;		// the bump below makes it one
             else
@@ -1808,13 +1813,101 @@ void os9::f_link(int nonmapping)
  * process's memory, below anything already there. Returns where it went, or
  * zero with the error already reported.
  */
-Word os9::load_image(Byte *upath)
+Word os9::load_image(Byte *upath, long off)
 {
-    unsigned char modhead[14];
     devdrvr *dev;
     fdes *fd;
+    Word base;
+
+    dev = find_device(upath);
+    if(!dev)
+    {
+        sys_error(E_MNF);
+        return 0;
+    }
+    fd = dev->open((char*)&upath[strlen(dev->mntpoint)],5,0);
+    if(!fd)
+    {
+        sys_error(dev->errorcode ? dev->errorcode : E_PNNF);
+        return 0;
+    }
+    if(off > 0 && fd->seek((int)off) != 0)
+    {
+        fd->close();
+        if(fd->usecount == 0) delete fd;
+        sys_error(E_BMID);
+        return 0;
+    }
+
+    base = read_module(fd, off == 0);
+
+    fd->close();
+    if(fd->usecount == 0) delete fd;
+    return base;
+}
+
+/*
+ * Read the module the path is positioned at into memory, placing it at the
+ * top and below anything already there. Returns where it went, or zero -- and
+ * an error only if the caller says a module was expected here at all, since
+ * walking a file of them ends by finding that there is not another.
+ *
+ * Reporting the header without actually loading it -- which this used to do
+ * -- left the caller reading whatever was at address 0, which is its own
+ * image: runb concluded that every packed procedure it was handed had a
+ * compiler error in it.
+ */
+Word os9::read_module(fdes *fd, int required)
+{
+    unsigned char modhead[14];
     Word base, addr, modsize;
     int val;
+
+    if(fd->read(modhead,14) < 14 || modhead[0] != 0x87 || modhead[1] != 0xcd)
+    {
+        if(required)
+            sys_error(E_BMID);
+        return 0;
+    }
+
+    modsize = (modhead[2] << 8) | modhead[3];
+
+    base = (Word)((modtop - modsize) & 0xff00);
+    if(modsize == 0 || base < uppermem || base > modtop)
+    {
+        sys_error(E_MemFul);
+        return 0;
+    }
+
+    memcpy(&memory[base], modhead, 14);
+    addr = base + 14;
+    while(addr < (Word)(base + modsize) &&
+          (val = fd->read(&memory[addr], (base + modsize) - addr)) > 0)
+        addr += val;
+
+    modtop = base;
+    return base;
+}
+
+/*
+ * F$Load's real work: every module in the file, not just the first.
+ *
+ * A module file may hold several merged, and the Level 2 CMDS/shell is nine
+ * of them -- shellplus and the date, deiniz, echo, iniz, link, load, save and
+ * unlink it expects to find resident afterwards. Loading only the first left
+ * the other eight where they were, so the shell's own "load" could never make
+ * good on what the file was merged for.
+ *
+ * Each module goes in the directory the machine shares, with the offset it
+ * sits at in the file, so that another process linking it later reads back
+ * the right one. Returns the first, which is what F$Load reports on.
+ */
+Word os9::load_file(Byte *upath)
+{
+    devdrvr *dev;
+    fdes *fd;
+    Word first = 0, base;
+    long off = 0;
 
     dev = find_device(upath);
     if(!dev)
@@ -1829,44 +1922,31 @@ Word os9::load_image(Byte *upath)
         return 0;
     }
 
-    /*
-     * Read the header first so we know how much room the module needs, then
-     * place it at the top of memory, below anything already loaded.
-     *
-     * Reporting the header without actually loading it -- which is what this
-     * used to do -- left the caller reading whatever was at address 0, which
-     * is its own image: runb concluded that every packed procedure it was
-     * handed had a compiler error in it.
-     */
-    if(fd->read(modhead,14) < 14 || modhead[0] != 0x87 || modhead[1] != 0xcd)
+    while((base = read_module(fd, first == 0)) != 0)
     {
-        fd->close();
-        if(fd->usecount == 0) delete fd;
-        sys_error(E_BMID);
-        return 0;
+        char name[64];
+        Word modsize = (Word)((memory[(Word)(base + 2)] << 8) |
+                               memory[(Word)(base + 3)]);
+
+        if(first == 0)
+            first = base;
+        if(modname(base, name, sizeof(name)))
+        {
+            register_module(base, name);
+            shared_add(name, (const char *)upath, off, modsize);
+        }
+        off += modsize;
+        if(fd->seek((int)off) != 0)
+            break;
     }
 
-    modsize = (modhead[2] << 8) | modhead[3];
-
-    base = (Word)((modtop - modsize) & 0xff00);
-    if(modsize == 0 || base < uppermem || base > modtop)
-    {
-        fd->close();
-        if(fd->usecount == 0) delete fd;
-        sys_error(E_MemFul);
-        return 0;
-    }
-
-    memcpy(&memory[base], modhead, 14);
-    addr = base + 14;
-    while(addr < (Word)(base + modsize) &&
-          (val = fd->read(&memory[addr], (base + modsize) - addr)) > 0)
-        addr += val;
     fd->close();
     if(fd->usecount == 0) delete fd;
 
-    modtop = base;
-    return base;
+    // A module we could not place is not a reason to lose the ones we did.
+    if(first != 0)
+        cc.bit.c = 0;
+    return first;
 }
 
 /*
@@ -1889,22 +1969,12 @@ int os9::register_module(Word base, const char *name)
 void os9::f_load(int nonmapping)
 {
     Byte upath[512];
-    char name[64];
     Word base;
 
     x += getpath(&memory[x],upath,1);
 
-    if((base = load_image(upath)) == 0)
+    if((base = load_file(upath)) == 0)
         return;
-
-    if(modname(base, name, sizeof(name)))
-    {
-        register_module(base, name);
-        // And into the directory the whole machine shares, so that the next
-        // process to ask for this module knows where to find it.
-        shared_add(name, (const char *)upath, 0,
-                   (memory[(Word)(base + 2)] << 8) | memory[(Word)(base + 3)]);
-    }
 
     modregs(base, nonmapping);
 
