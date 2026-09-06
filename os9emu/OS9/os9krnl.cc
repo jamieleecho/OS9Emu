@@ -33,6 +33,7 @@ extern "C" {
 #include <sys/wait.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <errno.h>
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
@@ -134,24 +135,66 @@ static int fd_ready(int fd)
 #define B_InUse 0x01			// RAMinUse, ../nitros9/defs/os9.d
 #define B_Mod   0x02			// ModBlock
 
-struct sharedmod {
-    char name[32];		// as F$Link asks for it
+/*
+ * A module image, wherever it is named from. The bytes are not shared -- only
+ * the fact of them is -- so what we keep is the file to read them back out
+ * of and the blocks of fake memory they answer to.
+ */
+struct sharedimg {
     char path[512];		// the OS9 pathlist it was loaded from
     long off;			// where in that file the module starts
     int  size;			// M$Size, so we know how much of it there is
     int  blk;			// the first block of fake memory it holds
     int  nblk;			// how many
+};
+
+struct sharedmod {
+    char name[32];		// as F$Link asks for it
+    struct sharedimg img;
     int  links;			// system-wide link count
 };
 
-struct sharedmoddir {
+/*
+ * And the processes, for the same reason and in the same page: an OS9 process
+ * id has to mean the same thing to every process in the machine, or F$Send
+ * cannot reach anybody and procs has nothing to list. Each process keeps its
+ * own row up to date and reads everybody else's.
+ *
+ * An id is a slot number plus one, so it is stable, small enough for the byte
+ * OS9 keeps it in, and reused after the process holding it has gone -- which
+ * is what a real system does with them too. Slot zero is never handed out:
+ * id 1 is the system process on a real machine, and procs starts its scan at
+ * 2 because of it.
+ */
+#define SHPROCS PIDMAX
+
+struct sharedproc {
+    int   used;
+    pid_t host;			// the host process this one is
+    int   id, parent;		// its OS9 id, and its parent's
+    int   user;
+    int   prior, age;
+    int   state;
+    int   pages;		// data area size, in 256-byte pages
+    unsigned sp;		// stack pointer, as at its last system call
+    char  module[32];		// the primary module
+    struct sharedimg img;	// and where to read that back from
+};
+
+struct sharedsys {
     volatile unsigned char lock;
     int count;
     unsigned char blkmap[SHBLKS];	// in the form F$GBlkMp hands over
     struct sharedmod ent[SHMODS];
+    struct sharedproc proc[SHPROCS];
 };
 
-static struct sharedmoddir *shmods = NULL;
+static struct sharedsys *shmods = NULL;
+
+// Our own row in the process table, as a file static so that the handler
+// which gives it back at exit can reach it. A forked child overwrites it with
+// its own before it runs anything.
+static int myproc = -1;
 
 #ifndef MAP_ANON
 #define MAP_ANON MAP_ANONYMOUS
@@ -167,7 +210,7 @@ static void shared_init(void)
     if(p == MAP_FAILED)
         return;
     memset(p, 0, sizeof(*shmods));
-    shmods = (struct sharedmoddir *)p;
+    shmods = (struct sharedsys *)p;
     for(int i = 0; i < SYSBLKS; i++)
         shmods->blkmap[i] = B_InUse;
 }
@@ -267,18 +310,18 @@ static void shared_add(const char *name, const char *path, long off, int size)
         for(i = 0; i < SHMODS; i++)
             if(shmods->ent[i].links == 0)
                 break;
-        if(i == SHMODS || strlen(path) >= sizeof(e->path))
+        if(i == SHMODS || strlen(path) >= sizeof(e->img.path))
         {
             shared_unlock(held);
             return;
         }
         e = &shmods->ent[i];
         snprintf(e->name, sizeof(e->name), "%s", name);
-        snprintf(e->path, sizeof(e->path), "%s", path);
-        e->off = off;
-        e->size = size;
-        e->blk = blocks_alloc(size);
-        e->nblk = e->blk ? (size + BLKSIZE - 1) / BLKSIZE : 0;
+        snprintf(e->img.path, sizeof(e->img.path), "%s", path);
+        e->img.off = off;
+        e->img.size = size;
+        e->img.blk = blocks_alloc(size);
+        e->img.nblk = e->img.blk ? (size + BLKSIZE - 1) / BLKSIZE : 0;
         e->links = 0;
         shmods->count++;
     }
@@ -299,7 +342,7 @@ static int shared_path(const char *name, char *path, size_t pathsize)
     if((e = shared_find(name)) != NULL)
     {
         if(path != NULL)
-            snprintf(path, pathsize, "%s", e->path);
+            snprintf(path, pathsize, "%s", e->img.path);
         found = 1;
     }
     shared_unlock(held);
@@ -327,8 +370,8 @@ static int shared_release(const char *name)
             left = 0;
             e->links = 0;
             e->name[0] = '\0';
-            blocks_free(e->blk, e->nblk);
-            e->blk = e->nblk = 0;
+            blocks_free(e->img.blk, e->img.nblk);
+            e->img.blk = e->img.nblk = 0;
             shmods->count--;
         }
     }
@@ -354,28 +397,183 @@ static int shared_copy(struct sharedmod *out, int max)
     return n;
 }
 
-// Which module is holding a block of the fake memory. It is the question
-// F$CpyMem is really asking when it is handed a DAT image to read through.
-static int shared_block(int blk, struct sharedmod *out)
+// Which image is holding a block of the fake memory. It is the question
+// F$CpyMem is really asking when it is handed a DAT image to read through --
+// and the answer may be a module in the directory or the program a process is
+// running, since procs asks it the same way mdir does.
+static int shared_block(int blk, struct sharedimg *out)
 {
-    struct sharedmod *e;
+    struct sharedimg *g;
     int held, i, found = 0;
 
     if(!shmods || blk < SYSBLKS)
         return 0;
     held = shared_lock();
-    for(i = 0; i < SHMODS; i++)
+    for(i = 0; i < SHMODS + SHPROCS && !found; i++)
     {
-        e = &shmods->ent[i];
-        if(e->links > 0 && e->nblk > 0 && blk >= e->blk && blk < e->blk + e->nblk)
+        if(i < SHMODS)
         {
-            *out = *e;
+            if(shmods->ent[i].links <= 0)
+                continue;
+            g = &shmods->ent[i].img;
+        }
+        else
+        {
+            if(!shmods->proc[i - SHMODS].used)
+                continue;
+            g = &shmods->proc[i - SHMODS].img;
+        }
+        if(g->nblk > 0 && blk >= g->blk && blk < g->blk + g->nblk)
+        {
+            *out = *g;
             found = 1;
-            break;
         }
     }
     shared_unlock(held);
     return found;
+}
+
+/*
+ * The processes.
+ *
+ * A row belongs to the process in it, which keeps it current and gives it
+ * back on the way out. One that dies without doing so -- killed, or crashed
+ * -- leaves its row behind, so anybody walking the table drops the rows whose
+ * host process has gone first. Asking the host is the only way to know: there
+ * is nobody here to notice a death but the next process to look.
+ */
+static void shproc_reap(void)		// with the lock held
+{
+    struct sharedproc *p;
+    int i;
+
+    for(i = 0; i < SHPROCS; i++)
+    {
+        p = &shmods->proc[i];
+        if(!p->used || p->host == 0)
+            continue;
+        if(kill(p->host, 0) == 0 || errno != ESRCH)
+            continue;
+        blocks_free(p->img.blk, p->img.nblk);
+        memset(p, 0, sizeof(*p));
+    }
+}
+
+// Take a row, and hand back the OS9 process id that goes with it. The caller
+// forks afterwards, so the row is claimed before either half of the fork can
+// need it -- and freed again if the fork does not happen.
+static int shproc_alloc(int parent, int user, int pages, const char *module)
+{
+    struct sharedproc *p;
+    int held, i, id = -1;
+
+    if(!shmods)
+        return -1;
+    held = shared_lock();
+    shproc_reap();
+    for(i = 1; i < SHPROCS; i++)
+        if(!shmods->proc[i].used)
+        {
+            p = &shmods->proc[i];
+            memset(p, 0, sizeof(*p));
+            p->used = 1;
+            p->id = i + 1;
+            p->parent = parent;
+            p->user = user;
+            p->prior = p->age = 128;
+            p->pages = pages;
+            snprintf(p->module, sizeof(p->module), "%s", module ? module : "");
+            id = i + 1;
+            break;
+        }
+    shared_unlock(held);
+    return id;
+}
+
+static void shproc_claim(int id, pid_t host)
+{
+    if(!shmods || id < 1 || id > SHPROCS)
+        return;
+    shmods->proc[id - 1].host = host;
+}
+
+static void shproc_free(int id)
+{
+    struct sharedproc *p;
+    int held;
+
+    if(!shmods || id < 1 || id > SHPROCS)
+        return;
+    held = shared_lock();
+    p = &shmods->proc[id - 1];
+    blocks_free(p->img.blk, p->img.nblk);
+    memset(p, 0, sizeof(*p));
+    shared_unlock(held);
+}
+
+// What a process is running, once it knows: the name for procs to print and
+// the file to read the header and that name back out of.
+static void shproc_setimg(int id, const char *module, const char *path,
+                          long off, int size, int pages)
+{
+    struct sharedproc *p;
+    int held;
+
+    if(!shmods || id < 1 || id > SHPROCS)
+        return;
+    held = shared_lock();
+    p = &shmods->proc[id - 1];
+    blocks_free(p->img.blk, p->img.nblk);
+    snprintf(p->module, sizeof(p->module), "%s", module);
+    snprintf(p->img.path, sizeof(p->img.path), "%s", path);
+    p->img.off = off;
+    p->img.size = size;
+    p->img.blk = blocks_alloc(size);
+    p->img.nblk = p->img.blk ? (size + BLKSIZE - 1) / BLKSIZE : 0;
+    p->pages = pages;
+    shared_unlock(held);
+}
+
+static int shproc_copy(int id, struct sharedproc *out)
+{
+    int held, found = 0;
+
+    if(!shmods || id < 1 || id > SHPROCS)
+        return 0;
+    held = shared_lock();
+    shproc_reap();
+    if(shmods->proc[id - 1].used)
+    {
+        *out = shmods->proc[id - 1];
+        found = 1;
+    }
+    shared_unlock(held);
+    return found;
+}
+
+// The host process an OS9 process id belongs to, so that F$Send can reach
+// any process in the machine and not only the ones this one forked.
+static pid_t shproc_host(int id)
+{
+    if(!shmods || id < 1 || id > SHPROCS || !shmods->proc[id - 1].used)
+        return 0;
+    return shmods->proc[id - 1].host;
+}
+
+// Where our stack is now. procs prints it, and it is the one field of a row
+// that moves under its owner's feet, so it is written on the way into every
+// system call rather than kept up to date instruction by instruction.
+static void shproc_sp(unsigned sp)
+{
+    if(shmods && myproc >= 1 && myproc <= SHPROCS)
+        shmods->proc[myproc - 1].sp = sp;
+}
+
+static void shproc_atexit(void)
+{
+    if(myproc > 0)
+        shproc_free(myproc);
+    myproc = -1;
 }
 
 /*
@@ -452,7 +650,7 @@ os9::os9()
         ssig[inx] = 0;
     icpt_pc = icpt_u = 0;
     dev_end = 0;
-    pid_end = 0;
+    memset(pids, 0, sizeof(pids));
     mod_end = 0;
     modtop = MEMTOP;
     cwd[0] = cxd[0] = '\0';
@@ -495,9 +693,19 @@ void os9::init()
     }
 
     // Set up some PIDs This process is hardcoded to PID #1
-    pids[0] = getppid();
-    pids[1] = getpid();
-    pid_end = 2;
+
+    /*
+     * And a row in the process table, so that this process has an OS9 id the
+     * rest of the machine agrees with. Everything it forks takes a row of its
+     * own; the module each one is running is filled in by loadmodule, which
+     * is where the pathlist is finally resolved.
+     */
+    atexit(shproc_atexit);
+    if((myproc = shproc_alloc(0, getuid() & 0xffff, 0, "")) > 0)
+        shproc_claim(myproc, getpid());
+    else
+        myproc = 2;
+    pids[myproc] = getpid();
 }
 
 os9::~os9()
@@ -712,6 +920,19 @@ void os9::loadmodule(const char *filename,const char *parm,int pages)
         top = modtop;
     uppermem = (int)top;
 
+    /*
+     * What this process is now running, for procs to name, and how much data
+     * area it settled on. The pathlist is only resolved here, which is why
+     * the row cannot be filled in at the fork that made the process.
+     */
+    {
+        char who[64];
+
+        if(modname(STARTPROG, who, sizeof(who)))
+            shproc_setimg(myproc, who, (const char *)tmpfn, 0, modsize,
+                          (uppermem - lowermem) >> 8);
+    }
+
     y = uppermem;
 
     /*
@@ -782,7 +1003,7 @@ void os9::f_fork()
     pid_t pid;
     Byte upath[512];
     Byte parm[256];
-    int len, i, pages;
+    int len, i, pages, child;
 
     if(debug_syscall)
         fprintf(stderr,"'os9::f_fork: %d pages requested\n",b);
@@ -811,33 +1032,53 @@ void os9::f_fork()
      */
     fflush(NULL);
 
+    /*
+     * The child's row in the process table is taken before the fork, so that
+     * neither half has to wait on the other to know what its id is. Both then
+     * write the same host process into it, which is the one thing only the
+     * fork can tell them.
+     */
+    child = shproc_alloc(myproc, getuid() & 0xffff, pages, "");
+    if(child < 0)
+    {
+        // No shared table to hand ids out; any free slot of our own will do.
+        for(i = 2; i <= PIDMAX && child < 0; i++)
+            if(i != myproc && pids[i] == 0)
+                child = i;
+    }
+    if(child < 0)
+    {
+        sys_error(E_PrcFul);
+        return;
+    }
+
     pid = fork();
     if(pid == 0)
     {
         // In the child: replace this process with the new program. Our whole
         // machine was copied by fork(), so the paths and directories the child
         // inherits are exactly the ones OS9 would have given it.
+        myproc = child;
+        shproc_claim(child, getpid());
         loadmodule((char*)&memory[x],(char*)parm,pages);
     }
     else if(pid < 0)
     {
+        shproc_free(child);
         sys_error(E_PrcFul);
     }
     else
     {
         x += getpath(&memory[x],upath,1);
 
-        // Hand back an OS9 process id, and remember which host process it is
-        // so F$Wait and F$Send can find it again.
-        a = 2;
-        for(i = 0; i < pid_end; i++)
-            if(pids[i] == pid)
-                a = i;
-        if(pids[a] != pid && pid_end < 32)
-        {
-            pids[pid_end] = pid;
-            a = pid_end++;
-        }
+        shproc_claim(child, pid);
+
+        // Hand back the OS9 process id, and remember which host process it
+        // is. The child gives its row in the shared table back on the way
+        // out, and F$Wait is asked after that has happened -- so the mapping
+        // F$Wait answers from has to be one of our own.
+        pids[child] = pid;
+        a = (Byte)child;
     }
 }
 /*
@@ -859,10 +1100,13 @@ void os9::f_wait()
         return;
     }
 
-    a = 2;
-    for(i = 0; i < pid_end; i++)
+    a = 0;
+    for(i = 1; i <= PIDMAX; i++)
         if(pids[i] == pid)
-            a = i;
+        {
+            a = (Byte)i;
+            pids[i] = 0;	// the id is free for the next child to take
+        }
     b = WIFEXITED(status) ? (Byte)WEXITSTATUS(status) : 0;
 }
 
@@ -1057,7 +1301,7 @@ void os9::f_gmoddr()
     {
         Word e = (Word)(i * MD_ESIZE);
         Word img = (Word)(MD_SIZE - MD_IMGSZ * (i + 1));
-        Word bsize = (Word)(ent[i].nblk * BLKSIZE);
+        Word bsize = (Word)(ent[i].img.nblk * BLKSIZE);
 
         dir[e]     = (Byte)((MD_BASE + img) >> 8);	// MD$MPDAT
         dir[e + 1] = (Byte)(MD_BASE + img);
@@ -1068,8 +1312,8 @@ void os9::f_gmoddr()
         dir[e + 6] = (Byte)(ent[i].links >> 8);		// MD$Link
         dir[e + 7] = (Byte)ent[i].links;
 
-        for(j = 0; j < ent[i].nblk && j < MD_IMGSZ / 2; j++)
-            dir[img + j * 2 + 1] = (Byte)(ent[i].blk + j);
+        for(j = 0; j < ent[i].img.nblk && j < MD_IMGSZ / 2; j++)
+            dir[img + j * 2 + 1] = (Byte)(ent[i].img.blk + j);
     }
 
     for(i = 0; i < MD_SIZE; i++)
@@ -1080,6 +1324,90 @@ void os9::f_gmoddr()
 
     if(debug_syscall)
         fprintf(stderr,"'os9::f_gmoddr: %d modules\n",n);
+}
+
+/*
+ * F$GPrDsc: hand back a copy of a process descriptor.
+ *
+ * Entry: A = the process id, X = a 512-byte buffer
+ *
+ * Same shape as F$GModDr and for the same reason: under Level 2 the table is
+ * in an address space the caller cannot reach, so procs asks for a row rather
+ * than walking to it. The row is built from the shared process table -- which
+ * is what makes an OS9 process id mean the same thing to every process here.
+ *
+ * The primary module is named the way mdir names one: P$DATImg holds the
+ * blocks of the program the process is running, P$PModul is where it starts
+ * inside them, and procs reads the header and the name through F$CpyMem.
+ */
+#define PD_SIZE 0x200
+
+void os9::f_gprdsc()
+{
+    struct sharedproc p;
+    Byte pd[PD_SIZE];
+    Word buf = x;
+    int i;
+
+    if(!shproc_copy(a, &p))
+    {
+        sys_error(E_IPrcID);
+        return;
+    }
+
+    memset(pd, 0, sizeof(pd));
+    pd[0x00] = (Byte)p.id;			// P$ID
+    pd[0x01] = (Byte)p.parent;			// P$PID
+    pd[0x04] = (Byte)(p.sp >> 8);		// P$SP
+    pd[0x05] = (Byte)p.sp;
+    pd[0x06] = (Byte)p.id;			// P$Task
+    pd[0x07] = (Byte)p.pages;			// P$PagCnt
+    pd[0x08] = (Byte)(p.user >> 8);		// P$User
+    pd[0x09] = (Byte)p.user;
+    pd[0x0a] = (Byte)p.prior;			// P$Prior
+    pd[0x0b] = (Byte)p.age;			// P$Age
+    pd[0x0c] = (Byte)p.state;			// P$State
+    pd[0x11] = 0;				// P$PModul: a module of ours
+    pd[0x12] = 0;				// starts its first block
+
+    for(i = 0; i < p.img.nblk && i < 32; i++)	// P$DATImg
+        pd[0x40 + i * 2 + 1] = (Byte)(p.img.blk + i);
+
+    for(i = 0; i < PD_SIZE; i++)
+        memory[(Word)(buf + i)] = pd[i];
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::f_gprdsc: %d is %s\n",p.id,p.module);
+}
+
+/*
+ * F$GBlkMp: hand back a copy of the system's memory block map.
+ *
+ * Entry: X = a 1K buffer
+ * Exit:  D = bytes per block, Y = how long the map is
+ *
+ * One byte a block, zero meaning free, which is what mfree counts and what
+ * procs takes the block size out of. The memory is the fake one the module
+ * directory is expressed in -- a module in the directory or a program a
+ * process is running holds blocks of it -- so what mfree prints is the room
+ * left for those, not the room left in anybody's 64K.
+ */
+void os9::f_gblkmp()
+{
+    unsigned char map[SHBLKS];
+    int i;
+
+    memset(map, 0, sizeof(map));
+    if(shmods)
+        for(i = 0; i < SHBLKS; i++)
+            map[i] = shmods->blkmap[i];
+
+    for(i = 0; i < SHBLKS; i++)
+        memory[(Word)(x + i)] = map[i];
+
+    a = (Byte)(BLKSIZE >> 8);
+    b = (Byte)BLKSIZE;
+    y = SHBLKS;
 }
 
 /*
@@ -1126,7 +1454,7 @@ int os9::module_bytes(const char *path, long off, Byte *dst, int count)
  */
 void os9::f_cpymem()
 {
-    struct sharedmod e;
+    struct sharedimg e;
     Word dat = (Word)((a << 8) | b);
     Word count = y, end = (Word)(u + count);
     int blk = (memory[dat] << 8) | memory[(Word)(dat + 1)];
@@ -1152,7 +1480,7 @@ void os9::f_cpymem()
 
     if(debug_syscall)
         fprintf(stderr,"'os9::f_cpymem: %d bytes of %s at %ld\n",
-                count,e.name,off);
+                count,e.path,off);
 }
 
 /*
@@ -1164,28 +1492,33 @@ void os9::f_cpymem()
 void os9::f_send()
 {
     int slot = a;
+    pid_t target = shproc_host(a);
 
     if(debug_syscall)
         fprintf(stderr,"'os9::f_send: pid %d signal %d\n",a,b);
 
-    if(slot < 0 || slot >= pid_end)
+    // The shared process table names every process in the machine, not only
+    // the ones this one forked -- which is what an OS9 process id is for.
+    if(target == 0 && slot >= 1 && slot <= PIDMAX)
+        target = pids[slot];
+    if(target == 0)
     {
         sys_error(E_IPrcID);
         return;
     }
+
     if(b == S_Kill)
     {
-        if(kill(pids[slot], SIGTERM) == -1)
+        if(kill(target, SIGTERM) == -1)
             sys_error(E_IPrcID);
     }
     else if(b == S_Wake)	// wake a process out of F$Sleep
     {
-        if(kill(pids[slot], SIGUSR1) == -1)
+        if(kill(target, SIGUSR1) == -1)
             sys_error(E_IPrcID);
     }
     // The rest of the signal codes carry meaning we have nowhere to put: a
-    // host signal cannot bring the code with it, and the module directory
-    // each process keeps is its own. See #1.
+    // host signal cannot bring the code with it.
 }
 
 /*
@@ -1708,7 +2041,7 @@ void os9::f_crc()
  */
 void os9::f_id()
 {
-    a = 1;
+    a = (Byte)(myproc > 0 ? myproc : 1);
     y = getuid() & 0xffff;
 }
 
@@ -2150,6 +2483,7 @@ void os9::i_chgdir()
 void os9::swi2(void)
 {
     cc.bit.c = 0;
+    shproc_sp(s);		// the one field of our row that keeps moving
     switch(memory[pc++])
     {
         case 0x00:
@@ -2221,6 +2555,12 @@ void os9::swi2(void)
             f_crc();
             break;
 
+        case 0x18:		// F$GPrDsc
+            f_gprdsc();
+            break;
+        case 0x19:		// F$GBlkMp
+            f_gblkmp();
+            break;
         case 0x1a:		// F$GModDr
             f_gmoddr();
             break;
