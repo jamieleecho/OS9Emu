@@ -40,7 +40,13 @@ extern "C" {
 #include "os9krnl.h"
 #include "errcodes.h"
 
-os9config os9cfg = { NULL, "/h0", "/h0/CMDS", 0, EOL_AUTO, 0 };
+/*
+ * The working and execution directories a process starts with. /dd is OS9's
+ * default device -- what the C compiler and most of the utilities reach for
+ * when they do not name a drive -- so that is where a real system puts them,
+ * and pwd and pxd now print these back verbatim.
+ */
+os9config os9cfg = { NULL, "/dd", "/dd/CMDS", 0, EOL_AUTO, 0 };
 
 #define STARTPROG 0x00
 #define TOPMEM   0xf800
@@ -1292,6 +1298,14 @@ void os9::i_chgdir()
         sys_error(E_MNF);
         return;
     }
+
+    /*
+     * Resolve the dots now, before the name is remembered. Storing "/h0/T1/.."
+     * as it stands left "chd .." sitting where it was and every later relative
+     * path built on a directory that grew a component each time.
+     */
+    canonicalizePath((char*)upath,(char*)upath,strlen(dev->mntpoint),
+                     sizeof(upath));
 
     dev->errorcode = 0;
     fd = dev->open((const char*)&upath[strlen(dev->mntpoint)], 0x80 | 1, 0);

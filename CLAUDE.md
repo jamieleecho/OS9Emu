@@ -58,6 +58,39 @@ OS-9 ends a name with a byte that has bit 7 set, and that byte is the last
 *character* of the name, not a delimiter. `F$PrsNam` has to count it, and
 `SS_DevNm` has to produce it. Without that, `pwd` prints `/h` for `/h0`.
 
+### A directory starts with `..`, then `.`
+
+RBF's `MakDir` writes the parent's entry first and the directory's own second
+(`ldd #$2EAE` in `../nitros9/level1/modules/rbf.asm`), and `pwd` and `pxd`
+count on that order. They read the two entries, take them being equal to mean
+"this is the root", and otherwise `chd ..` and hunt through the parent for the
+entry whose LSN matches the *second* one — the directory they just came from.
+With `.` first the hunt looks for the parent's own number, never finds it,
+reads to the end and prints `read error`.
+
+We had them the other way round, and the mistake hid itself: our `..` also
+resolved to the directory itself, so the two LSNs matched, every directory
+looked like the root and `pwd` stopped there and printed just `/h0`. That is
+what "pwd and pxd print only the device name" used to mean.
+
+`dir` seeks straight past both entries, so it never noticed either way.
+
+### Dots are components, not characters
+
+`.` is this directory and `..` is the parent, and only when they are a whole
+component: `.profile`, `a.b` and `...` are names. `canonicalizePath` used to
+work by counting dots as it went, which got all of it wrong — `/dd/T1/..`
+came back as `/dd/T1`, so `chd ..` stayed where it was and `dir T1/..` listed
+`T1`; `/dd/./T1` kept its dot; and a `.` inside a name after any earlier
+hidden name ate a whole directory component.
+
+`..` stops at the mount point, so no path walks out of the OS-9 disk and into
+the rest of the host filesystem, and the root comes out as its own parent —
+which is what OS-9 does and what `pwd` needs to know when to stop.
+
+`I$ChgDir` resolves the dots before it stores the name. Keeping `/h0/T1/..`
+as it stood left the working directory a component longer after every `chd`.
+
 ### Line endings
 
 OS-9 ends a line with a bare CR. The terminal driver expands it to CR LF on
@@ -249,9 +282,10 @@ scaled down — the proportions are right, the absolute numbers cannot be.
   have nothing to wake, since a sleeping process is inside `nanosleep`.
 - `load`, `link`, `mdir` and `printerr` only see modules the running program
   loaded itself — see "the module directory is per process" above, and #1.
-- The execution directory is not handled properly: `pwd` and `pxd` print only
-  the device name, `pxd` fails after a `chx`, and a relative pathname with a
-  `/` in it is looked up under `cxd` rather than the working directory. #2.
+- A program cannot be named by a pathname: `F$Link` moves the caller's X past
+  the leading `/`, so the shell prefixes `cxd` to an absolute path and then
+  runs the module as a shell procedure, and our own command line only ever
+  looks under `cxd`. #7.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
