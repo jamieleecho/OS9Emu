@@ -1,0 +1,104 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "../nitros9",
+      "../reversi",
+      "~/Applications/mame",
+      "~/OS9"
+    ],
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.kube/**)",
+      "Read(~/.docker/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.netrc)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.claude.json)",
+      "Read(~/Library/Keychains/**)",
+      "Read(~/Documents/**)",
+      "Read(~/Desktop/**)",
+      "Read(~/Downloads/**)"
+    ]
+  },
+
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true,
+
+    "//excludedCommands": "Run unsandboxed (still permission-prompted): SSH git, gh, docker, and Xcode's build daemons, none of which survive the sandbox.",
+    "excludedCommands": ["gh *", "docker *", "git *", "xcodebuild *", "xcrun *"],
+
+    "filesystem": {
+      "allowWrite": [
+        "../nitros9",
+        "../reversi",
+        "~/OS9",
+        "~/Applications/mame",
+        "~/Library/Developer/Xcode/DerivedData",
+        "~/Library/Caches"
+      ],
+      "denyRead": [
+        "~/"
+      ],
+      "allowRead": [
+        ".",
+        "../nitros9",
+        "../reversi",
+        "~/OS9",
+        "~/Applications/mame",
+        "~/Library/Developer",
+        "~/Library/Caches",
+        "~/Library/Preferences",
+        "~/.claude/shell-snapshots",
+        "~/.claude/plugins",
+        "~/.claude/settings.json",
+        "~/.local/share/claude",
+        "~/.local/bin",
+        "~/.zshrc",
+        "~/.zshenv",
+        "~/.zprofile",
+        "~/.gitconfig",
+        "~/.local/config/git"
+      ]
+    },
+
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "*.github.com",
+        "objects.githubusercontent.com",
+        "raw.githubusercontent.com",
+        "*.githubusercontent.com"
+      ],
+      "//allowMachLookup": "MAME opens a window and audio device on the host; these XPC services are what a windowed run needs.",
+      "allowMachLookup": [
+        "com.apple.windowserver.active",
+        "com.apple.CoreDisplay.master",
+        "com.apple.coreservices.launchservicesd",
+        "com.apple.audio.*",
+        "com.apple.coreaudio.*",
+        "com.apple.fonts",
+        "com.apple.view-bridge",
+        "com.apple.hiservices-xpcservice",
+        "com.apple.CARenderServer"
+      ]
+    },
+
+    "credentials": {
+      "files": [
+        { "path": "~/.ssh", "mode": "deny" },
+        { "path": "~/.aws", "mode": "deny" },
+        { "path": "~/.gnupg", "mode": "deny" },
+        { "path": "~/.claude/.credentials.json", "mode": "deny" }
+      ]
+    }
+  }
+}
