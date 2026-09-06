@@ -79,6 +79,7 @@ public:
     int seek(int);
     int getstatus (int, statusbuf *);
     int setstatus (int, statusbuf *);
+    int hostfd();
 };
 
 class fdirunix: public fdunix {
@@ -165,6 +166,7 @@ public:
     int seek(int);
     int getstatus (int, statusbuf *);
     int setstatus (int, statusbuf *);
+    int hostfd();
 };
 
 /*
@@ -190,4 +192,5 @@ public:
     int writeln(Byte *,int);
     int getstatus (int, statusbuf *);
     int setstatus (int, statusbuf *);
+    int hostfd();
 };

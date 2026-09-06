@@ -797,6 +797,11 @@ int fdunix::getstatus(int opcode,statusbuf *status)
     return(0);
 }
 
+int fdunix::hostfd()
+{
+    return fp ? fileno(fp) : -1;
+}
+
 int fdunix::setstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
@@ -1698,6 +1703,16 @@ int fdterm::getstatus(int opcode, statusbuf *status)
     return(0);
 }
 
+/*
+ * What to wait on for input. A terminal, a pipe and an ordinary file all sit
+ * behind a stdio stream, and it is that stream's descriptor SS_SSig watches.
+ * Standard input is read unbuffered, so nothing hides from poll() there.
+ */
+int fdterm::hostfd()
+{
+    return fp ? fileno(fp) : -1;
+}
+
 int fdterm::setstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
@@ -1867,6 +1882,11 @@ int fdpipe::getstatus(int opcode,statusbuf *status)
             return(errorcode = E_UnkSvc);
     }
     return(0);
+}
+
+int fdpipe::hostfd()
+{
+    return ifp ? fileno(ifp) : -1;
 }
 
 int fdpipe::setstatus(int opcode,statusbuf *status)

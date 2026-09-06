@@ -156,6 +156,45 @@ its program over the copy. Two consequences:
   bytes it swallowed reach the child as a private copy, so a piped script runs
   some lines twice.
 
+### A shell waits for a signal, not for a read
+
+`shellplus` — the shell a Level 2 system runs, and one Level 1 builds without
+installing — never blocks in `I$ReadLn` waiting for a command. It asks the
+terminal driver to signal it when a key arrives (`SS.SSig` on standard input),
+names a routine to enter when a signal turns up (`F$Icpt`), and then sleeps
+until it is signalled (`F$Sleep` with X = 0). Its intercept routine is two
+instructions, `stb <u000E` and `rti`; the main loop reads that byte back and,
+if it is the $0B it asked for, goes and reads the line.
+
+Three calls, and none of them works unless all three do. `F$Sleep(0)` used to
+be `wait()` for a child process, which returns at once when there are none, so
+shellplus printed its banner and its prompt and then spun at 100% CPU having
+never issued a read. That looks exactly like a hung shell and is not.
+
+The kernel therefore keeps the intercept routine (`icpt_pc`, `icpt_u`) and the
+signal each path owes us (`ssig[]`), and `F$Sleep` waits by `poll`ing the host
+descriptors behind those paths. Delivering a signal is what OS-9 does with
+one: push the registers onto the process's own stack as an ordinary interrupt
+frame, set B to the signal code and U to the intercept's memory pointer, and
+vector to the routine. Its `RTI` puts the frame back and carries on from the
+instruction after the system call that was interrupted — so the sleep simply
+returns, which is what the caller is waiting for.
+
+A driver sends its `SS.SSig` signal once and forgets the request; the caller
+sets it up again each time round its loop. One whose input is *already*
+waiting sends the signal there and then rather than storing the request
+(`RSendSig` in `../nitros9/level1/modules/mc6850.asm`), and `SS.Relea` takes
+the request back.
+
+The register convention is not where you would guess it: `I$SetStt` holds the
+function code in B, so `SS.SSig` carries the signal to send in the **low byte
+of X**.
+
+`F$Send` delivers `S$Wake` as well as a kill, as a `SIGUSR1` whose only job is
+to break the `poll` — installed without `SA_RESTART`, or it would not even do
+that. A signal *code* cannot travel with it, since each OS-9 process here is a
+host process, so the rest of the codes still have nowhere to go.
+
 ### Unknown service calls must not be fatal
 
 Real OS-9 answers `E$UnkSvc` and lets the caller decide. Bailing out of the
@@ -362,32 +401,24 @@ what "unknown service calls must not be fatal" bought.
 `level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
 delta from a Level 1 one. 101 modules against 93.
 
-### Every Level 2 failure so far is the shell
+### The Level 2 shell, and what is left after it
 
-`tests/run.sh` against the Level 2 root passes 12 of its 18 cases, and all six
-failures trace back to `CMDS/shell`. There are two separate problems in there.
-
-**shellplus waits for a signal that never comes.** `CMDS/shell` in the Level 2
-port is not one module but nine merged: `shellplus` and the `date`, `deiniz`,
-`echo`, `iniz`, `link`, `load`, `save` and `unlink` it expects to find resident
-afterwards. It reads its terminal the way OS-9 asks you to — `SS.SSig` ($1A)
-on path 0, to have the driver signal it when a key arrives, then `F$Sleep`
-with X=0 to sleep until signalled. Our `F$Sleep(0)` is `wait()` for a child,
-there is no child, and `F$Icpt` ($09) is ignored — so the signal has nowhere
-to be delivered and nothing to deliver it. shellplus prints its banner and its
-prompt, never issues a read, and spins at 100% CPU. That is `shell`, `dots`
-and `progpath`.
+`CMDS/shell` in the Level 2 port is not one module but nine merged:
+`shellplus` and the `date`, `deiniz`, `echo`, `iniz`, `link`, `load`, `save`
+and `unlink` it expects to find resident afterwards. It ran nothing at all
+until `SS.SSig`, `F$Icpt` and `F$Sleep(0)` added up to a delivered signal —
+see "a shell waits for a signal, not for a read" above. It now runs commands,
+redirects, and exits at end of file, on either root; `tests/cases/shellplus.t`
+is the case that says so.
 
 Something else follows from `shell` being a merged file. `F$Load` loads only
-the *first* module of one — it reads a header, takes `M$Size` from it and stops
-— so the other eight never reach the module directory, and the directory is
-per-process anyway (#1). Real `F$Load` loads every module in the file.
+the *first* module of one — it reads a header, takes `M$Size` from it and
+stops — so the other eight never reach the module directory, and the directory
+is per-process anyway (#1). Real `F$Load` loads every module in the file.
 
-**The Level 2 `shell_21` asks for the whole address space.** Substituting
-`shell_21` — assembled from the same source as Level 1's, but against the
-Level 2 defs, and a different binary for it — fixes those three cases and
-leaves `cc`, `dirlive` and `dirslots`, which die in `c.prep` with **grab
-overlap**. The trace says why:
+**The Level 2 `shell_21` asks for the whole address space.** What is left
+after the shell reads is `cc`, `dirlive` and `dirslots`, which die in `c.prep`
+with **grab overlap**. The trace says why:
 
 ```
 'os9::f_fork: 255 pages requested       <- Level 2 shell_21
@@ -400,10 +431,15 @@ request literally, `uppermem` lands at `MEMTOP`, and there is nothing left for
 `F$Mem` to add — which is exactly the ground the C runtime's `sbrk` allocates
 out of. See "memory layout is not a detail" above; this is that same bargain,
 broken from the other side. Dropping the Level 1 shell into the Level 2 root
-passes `cc` unchanged, so nothing else in the root is implicated.
+passes `cc` unchanged, so nothing else in the root is implicated. A process
+whose data area is asked to fill the address space needs headroom reserved
+above it regardless, or `F$Mem` has no answer to give.
 
-A process whose data area is asked to fill the address space needs headroom
-reserved above it regardless, or `F$Mem` has no answer to give.
+`dots`, `progpath` and `shell` fail on a Level 2 root for a duller reason:
+they are golden files of what Level 1's shell prints. shellplus writes the
+first half of its banner to standard *output*, so it lands in front of
+whatever the first command printed, and prompts `{term|01}/dd:` where
+`shell_21` prompts `OS9:`. The shell does the same work either way.
 
 ### What to leave alone
 
@@ -415,14 +451,15 @@ serve. They are also the least interesting commands in the set.
 
 ## Known gaps
 
-- No signals between processes. `F$Send` delivers a kill; the keyboard signals
-  have nothing to wake, since a sleeping process is inside `nanosleep`.
+- Signals reach a process from its own paths, through `SS.SSig`, and `F$Send`
+  carries `S$Kill` and `S$Wake` between processes. No other code travels: each
+  OS-9 process here is a host process, and a host signal cannot bring the code
+  with it.
 - `load`, `link`, `mdir` and `printerr` only see modules the running program
   loaded itself — see "the module directory is per process" above, and #1.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
   `tsmon`, `edit` — sit waiting for input the test harness never sends.
-- `SS.SSig`, `F$Icpt` and `F$Sleep(0)` do not add up to a delivered signal, so
-  the Level 2 shell never reads its terminal, and a data area asked to fill
-  the address space leaves `F$Mem` nothing to grow — see "Level 2" above.
+- A data area asked to fill the address space leaves `F$Mem` nothing to grow,
+  so the Level 2 shell cannot fork the C compiler — see "Level 2" above.
