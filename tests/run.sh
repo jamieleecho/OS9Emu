@@ -76,12 +76,19 @@ for name in "${names[@]}"; do
   # with a wall-clock limit so a hung program fails loudly instead of stalling
   # the suite. It is a script rather than a variable holding a command line, so
   # that a case can quote its arguments however it likes.
+  #
+  # The screen size is stated rather than asked for. A case's standard input is
+  # whatever ran the suite, so a program that reports on it -- tmode prints the
+  # page length out of the path options -- otherwise answers with the size of
+  # the window "make test" was typed in, and the golden file records that. A
+  # case that cares passes its own --cols or --rows after these, which wins.
   # Kept beside the OS-9 root rather than inside it: a file here would show
   # up in every directory listing a test takes.
   mkdir -p "$WORK.bin"
   cat > "$WORK.bin/os9run" <<RUNNER
 #!/usr/bin/env bash
-exec perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "$OS9EMU" --root "$WORK" "\$@"
+exec perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "$OS9EMU" \\
+  --root "$WORK" --cols 80 --rows 24 "\$@"
 RUNNER
   chmod +x "$WORK.bin/os9run"
   OS9="$WORK.bin/os9run"

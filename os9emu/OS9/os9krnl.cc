@@ -48,7 +48,7 @@ extern "C" {
  * when they do not name a drive -- so that is where a real system puts them,
  * and pwd and pxd now print these back verbatim.
  */
-os9config os9cfg = { NULL, "/dd", "/dd/CMDS", 0, EOL_AUTO, 0 };
+os9config os9cfg = { NULL, "/dd", "/dd/CMDS", 0, EOL_AUTO, 0, 0 };
 
 #define STARTPROG 0x00
 #define TOPMEM   0xf800

@@ -21,6 +21,7 @@ struct os9config {
     int         trace;		// trace system calls to stderr
     int         eol;		// one of EOL_*
     int         cols;		// screen width to report, or 0 to ask the terminal
+    int         rows;		// screen height, likewise
 };
 
 extern os9config os9cfg;
