@@ -19,7 +19,7 @@ scripts/os9root.sh    build ../nitros9 into ~/OS9 (--level 2 into ~/OS9L2)
 scripts/survey.sh     run every installed command, report how each fared
 scripts/mame-console.sh   drive a real NitrOS-9 in MAME for ground truth
 tests/run.sh          golden-output tests
-tests/cases/*.t,*.out the cases and what they should print
+tests/cases/*.t,*.out the cases and what they should print (*.2.out at Level 2)
 tests/mame/           the MAME side of the comparison harness
 ```
 
@@ -298,8 +298,48 @@ the same machine, and that is the case #1 is about.
 
 What this does not give is a module whose *contents* are shared, which is what
 `F$DatMod` would need: a data module has to be writable by everyone linked to
-it, and that wants real shared pages. `mdir` needs `F$GModDr` before it can
-show any of this, and `printerr` needs the same.
+it, and that wants real shared pages.
+
+### The directory a Level 2 utility is handed is a copy
+
+Sharing the table is half of it. The other half is that nothing could read it
+back: `mdir` printed a correct heading over nothing, because the copy it asks
+the kernel for — `F$GModDr` — was not a call we answered.
+
+The copy is not a list of entries. It is the whole region a real kernel keeps
+the directory in: entries from `D.ModDir` ($0A00) upwards, and the DAT image
+each entry's `MD$MPDAT` points at from `D.ModDir+2` ($1000) *downwards*, the
+two growing towards each other (`krn.asm` sets all three pointers to exactly
+these). `F$GModDr` copies the region whole and reports `Y` past the last entry
+and `U` = the address the region has on the system side; `mdir` then reads an
+entry's DAT image out of *its own copy*, at the offset it gets by subtracting
+that `U`. So the images have to travel in the same copy, at the offsets the
+pointers claim, or the block numbers come out of the middle of nothing.
+
+An entry names its module by block, not by address, and `F$CpyMem` is what
+turns a block back into bytes: `D` is not a process but the address, in the
+caller's own memory, of the block list to read through. So the emulator keeps
+a fake physical memory alongside the shared directory — 64 blocks of 8K, a
+512K CoCo 3 — and gives every module in the directory a block of its own. The
+bytes then come from the file the module was loaded from rather than from
+anyone's memory, which is as good: a module is read-only by rule, and what the
+machine shares is the directory and not the module memory.
+
+`F$CpyMem` handed a DAT image that names no block of ours copies within the
+caller's own memory, which is what it did for every caller before there was a
+directory to name.
+
+Level 1's `mdir` is a different program with the same name: it reads
+`D.ModDir` out of the kernel's direct page and follows `MD$MPtr` straight to
+the module header, both of which mean the modules have to be resident in the
+process that is asking. Ours are not — a forked `mdir` has loaded nothing —
+so on a Level 1 root it still prints a heading over nothing, and that is not
+something `F$GModDr` can fix.
+
+`printerr` is not waiting on this call at all. It links itself an extra time
+to stay resident and then installs its own `F$PErr` into the system service
+table with `F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG` — a
+6809 routine running kernel-side, which is a different thing to want.
 
 ### A new process gets a cleared data area
 
@@ -476,10 +516,11 @@ This is what makes Level 2 the easier of the two to host.
 
 Under Level 2 those tables live in another address space, so the utilities
 cannot walk them and have to ask the kernel for a copy instead. We have no
-direct page worth reading, but we can answer a question. All three run to
-completion today and print correct headings with nothing under them, because
-the calls they ask answer `E$UnkSvc` and the utilities carry on — which is
-what "unknown service calls must not be fatal" bought.
+direct page worth reading, but we can answer a question — and `mdir` does now
+list what `load` left behind. `procs` and `mfree` still print a correct
+heading with nothing under it, because the calls they ask answer `E$UnkSvc`
+and the utilities carry on, which is what "unknown service calls must not be
+fatal" bought.
 
 `level2/coco3/cmds` assembles most of its modules straight out of
 `level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
@@ -527,11 +568,10 @@ serve. They are also the least interesting commands in the set.
   carries `S$Kill` and `S$Wake` between processes. No other code travels: each
   OS-9 process here is a host process, and a host signal cannot bring the code
   with it.
-- `mdir` and `printerr` want `F$GModDr`, which answers with a copy of the
-  module directory laid out the way a real Level 2 kernel holds it. The
-  directory itself is shared now — see "the module directory is shared; the
-  module memory is not" — so `load`, `link` and `unlink` work across
-  processes, but nothing yet reads it back out. Neither does `F$DatMod`.
+- `procs` and `mfree` want `F$GPrDsc` and `F$GBlkMp`, the same shape of call
+  as the `F$GModDr` that `mdir` now gets an answer to. `F$DatMod` wants a
+  module whose contents are shared, which the shared directory deliberately
+  does not give.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,

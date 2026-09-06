@@ -1,0 +1,28 @@
+--- nothing has been loaded
+
+
+   Module Directory at HH:MM:SS
+
+Block Offset Size Typ Rev Attr  Use Module Name
+----- ------ ---- --- --- ---- ---- ------------
+--- two modules, loaded by the commands before it
+
+
+   Module Directory at HH:MM:SS
+
+Block Offset Size Typ Rev Attr  Use Module Name
+----- ------ ---- --- --- ---- ---- ------------
+   2      0    22  11   1 r...    1 Echo
+   3      0   5BD  11   0 r...    1 Copy
+--- the names on their own
+
+
+   Module Directory at HH:MM:SS
+Echo        Copy
+--- and unlinked again
+
+
+   Module Directory at HH:MM:SS
+
+Block Offset Size Typ Rev Attr  Use Module Name
+----- ------ ---- --- --- ---- ---- ------------

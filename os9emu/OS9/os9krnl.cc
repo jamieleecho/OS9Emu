@@ -118,15 +118,36 @@ static int fd_ready(int fd)
  */
 #define SHMODS 32
 
+/*
+ * A fake physical memory, in the 8K blocks a CoCo 3 divides its own into.
+ * Nothing is mapped through it -- every process still has its own flat 64K --
+ * but a Level 2 utility is handed the module directory in the kernel's terms,
+ * and the kernel's terms are blocks: an entry says which block its module
+ * sits in, and F$CpyMem reads the module by naming that block. So each module
+ * in the shared directory gets a block of its own, and the block is how mdir
+ * gets from an entry to the header and the name it prints.
+ */
+#define SHBLKS  64			// 8K blocks: the 512K a CoCo 3 has
+#define BLKSIZE 8192
+#define SYSBLKS 2			// what the system itself is holding
+
+#define B_InUse 0x01			// RAMinUse, ../nitros9/defs/os9.d
+#define B_Mod   0x02			// ModBlock
+
 struct sharedmod {
     char name[32];		// as F$Link asks for it
     char path[512];		// the OS9 pathlist it was loaded from
+    long off;			// where in that file the module starts
+    int  size;			// M$Size, so we know how much of it there is
+    int  blk;			// the first block of fake memory it holds
+    int  nblk;			// how many
     int  links;			// system-wide link count
 };
 
 struct sharedmoddir {
     volatile unsigned char lock;
     int count;
+    unsigned char blkmap[SHBLKS];	// in the form F$GBlkMp hands over
     struct sharedmod ent[SHMODS];
 };
 
@@ -147,6 +168,45 @@ static void shared_init(void)
         return;
     memset(p, 0, sizeof(*shmods));
     shmods = (struct sharedmoddir *)p;
+    for(int i = 0; i < SYSBLKS; i++)
+        shmods->blkmap[i] = B_InUse;
+}
+
+/*
+ * Hand out a run of blocks long enough to hold a module, or zero if there is
+ * no run that long. Block zero is the system's, so zero is free to mean none.
+ * Both of these want the directory lock already held.
+ */
+static int blocks_alloc(int bytes)
+{
+    int need = (bytes + BLKSIZE - 1) / BLKSIZE, i, run = 0;
+
+    if(!shmods || need <= 0)
+        return 0;
+    for(i = 0; i < SHBLKS; i++)
+    {
+        if(shmods->blkmap[i] & B_InUse)
+        {
+            run = 0;
+            continue;
+        }
+        if(++run < need)
+            continue;
+        for(run = i + 1 - need; run <= i; run++)
+            shmods->blkmap[run] = B_InUse | B_Mod;
+        return i + 1 - need;
+    }
+    return 0;
+}
+
+static void blocks_free(int blk, int nblk)
+{
+    int i;
+
+    if(!shmods || blk < SYSBLKS)
+        return;
+    for(i = blk; i < blk + nblk && i < SHBLKS; i++)
+        shmods->blkmap[i] = 0;
 }
 
 /*
@@ -190,7 +250,7 @@ static struct sharedmod *shared_find(const char *name)
  * keep is not an error: the module is in the loader's own memory either way,
  * and only another process loses by it.
  */
-static void shared_add(const char *name, const char *path)
+static void shared_add(const char *name, const char *path, long off, int size)
 {
     struct sharedmod *e;
     int held = shared_lock(), i;
@@ -215,6 +275,10 @@ static void shared_add(const char *name, const char *path)
         e = &shmods->ent[i];
         snprintf(e->name, sizeof(e->name), "%s", name);
         snprintf(e->path, sizeof(e->path), "%s", path);
+        e->off = off;
+        e->size = size;
+        e->blk = blocks_alloc(size);
+        e->nblk = e->blk ? (size + BLKSIZE - 1) / BLKSIZE : 0;
         e->links = 0;
         shmods->count++;
     }
@@ -263,11 +327,55 @@ static int shared_release(const char *name)
             left = 0;
             e->links = 0;
             e->name[0] = '\0';
+            blocks_free(e->blk, e->nblk);
+            e->blk = e->nblk = 0;
             shmods->count--;
         }
     }
     shared_unlock(held);
     return left;
+}
+
+/*
+ * A still picture of the directory, for a caller that wants to walk it --
+ * which is what F$GModDr hands over. Returns how many entries were live.
+ */
+static int shared_copy(struct sharedmod *out, int max)
+{
+    int held, i, n = 0;
+
+    if(!shmods)
+        return 0;
+    held = shared_lock();
+    for(i = 0; i < SHMODS && n < max; i++)
+        if(shmods->ent[i].links > 0)
+            out[n++] = shmods->ent[i];
+    shared_unlock(held);
+    return n;
+}
+
+// Which module is holding a block of the fake memory. It is the question
+// F$CpyMem is really asking when it is handed a DAT image to read through.
+static int shared_block(int blk, struct sharedmod *out)
+{
+    struct sharedmod *e;
+    int held, i, found = 0;
+
+    if(!shmods || blk < SYSBLKS)
+        return 0;
+    held = shared_lock();
+    for(i = 0; i < SHMODS; i++)
+    {
+        e = &shmods->ent[i];
+        if(e->links > 0 && e->nblk > 0 && blk >= e->blk && blk < e->blk + e->nblk)
+        {
+            *out = *e;
+            found = 1;
+            break;
+        }
+    }
+    shared_unlock(held);
+    return found;
 }
 
 /*
@@ -909,18 +1017,142 @@ void os9::f_cmpnam()
 }
 
 /*
- * F$CpyMem: copy from another process's address space into ours. There is only
- * one address space here, so this is a memcpy that wraps at 64K.
+ * Where a real Level 2 kernel keeps the module directory: entries from $0A00
+ * upwards, and the DAT image each entry points at from $1000 downwards, with
+ * the two growing towards each other in one region (krn.asm sets D.ModDir,
+ * D.ModDir+2 and D.ModDAT to exactly these). F$GModDr copies the whole region
+ * and mdir reads the images out of its own copy, so the layout has to be one
+ * piece and the addresses have to be the ones we claim they are.
+ */
+#define MD_BASE   0x0a00
+#define MD_SIZE   0x0600
+#define MD_ESIZE  8			// MD$MPDAT, MD$MBSiz, MD$MPtr, MD$Link
+#define MD_IMGSZ  16			// a DAT image covers 8 blocks
+
+/*
+ * F$GModDr: hand back a copy of the module directory.
  *
- * Entry: X = source, Y = byte count, U = destination, D = the process to copy
- *        from, which we ignore.
+ * Entry: X = a buffer -- 2K on a real system, and mdir gives 4K
+ * Exit:  Y = past the last entry of the copy, U = where the directory sits on
+ *        the system side, so the caller can translate the pointers inside it
+ *
+ * This is the half of a shared module directory that a utility can see. The
+ * table itself has been shared since modules started outliving the process
+ * that loaded them; until something answered this call, nothing could read it
+ * back and mdir printed a correct heading over nothing.
+ *
+ * mdir translates an entry's MD$MPDAT by the distance between the address we
+ * report in U and the buffer it gave us, so an entry's DAT image has to
+ * travel in the same copy at the offset the pointer claims.
+ */
+void os9::f_gmoddr()
+{
+    struct sharedmod ent[SHMODS];
+    Byte dir[MD_SIZE];
+    int n = shared_copy(ent, SHMODS), i, j;
+    Word buf = x;
+
+    memset(dir, 0, sizeof(dir));
+    for(i = 0; i < n; i++)
+    {
+        Word e = (Word)(i * MD_ESIZE);
+        Word img = (Word)(MD_SIZE - MD_IMGSZ * (i + 1));
+        Word bsize = (Word)(ent[i].nblk * BLKSIZE);
+
+        dir[e]     = (Byte)((MD_BASE + img) >> 8);	// MD$MPDAT
+        dir[e + 1] = (Byte)(MD_BASE + img);
+        dir[e + 2] = (Byte)(bsize >> 8);		// MD$MBSiz
+        dir[e + 3] = (Byte)bsize;
+        dir[e + 4] = 0;					// MD$MPtr: a module
+        dir[e + 5] = 0;					// of ours starts its block
+        dir[e + 6] = (Byte)(ent[i].links >> 8);		// MD$Link
+        dir[e + 7] = (Byte)ent[i].links;
+
+        for(j = 0; j < ent[i].nblk && j < MD_IMGSZ / 2; j++)
+            dir[img + j * 2 + 1] = (Byte)(ent[i].blk + j);
+    }
+
+    for(i = 0; i < MD_SIZE; i++)
+        memory[(Word)(buf + i)] = dir[i];
+
+    y = (Word)(buf + n * MD_ESIZE);
+    u = MD_BASE;
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::f_gmoddr: %d modules\n",n);
+}
+
+/*
+ * Read a module's image back off the disk it came from. A module is read-only
+ * by rule, so the file is as good as the memory somebody else has it in --
+ * and it is the only copy we can reach, since what the machine shares is the
+ * directory and not the module memory.
+ */
+int os9::module_bytes(const char *path, long off, Byte *dst, int count)
+{
+    Byte upath[512];
+    devdrvr *dev;
+    fdes *fd;
+    int got = 0, val;
+
+    snprintf((char *)upath, sizeof(upath), "%s", path);
+    if(!(dev = find_device(upath)))
+        return 0;
+    fd = dev->open((char *)&upath[strlen(dev->mntpoint)], 5, 0);
+    if(!fd)
+        return 0;
+    if(off > 0 && fd->seek((int)off) != 0)
+        count = 0;
+    while(got < count && (val = fd->read(dst + got, count - got)) > 0)
+        got += val;
+    fd->close();
+    if(fd->usecount == 0) delete fd;
+    return got;
+}
+
+/*
+ * F$CpyMem: copy out of an address space the caller cannot reach.
+ *
+ * Entry: D = a DAT image -- the address, in the caller's own memory, of the
+ *            block list of the space to read from
+ *        X = the offset within that space, Y = a byte count, U = where to put
+ *            what comes back
+ *
+ * The images we hand out through F$GModDr name modules in the shared
+ * directory, so the block at the head of the list says which module and X
+ * says how far into it. Anything else is a caller reading a space of its own
+ * describing, and the copy stays inside its own memory -- which is what this
+ * call did for every caller before there was a directory to name.
  */
 void os9::f_cpymem()
 {
-    Word i, count = y;
+    struct sharedmod e;
+    Word dat = (Word)((a << 8) | b);
+    Word count = y, end = (Word)(u + count);
+    int blk = (memory[dat] << 8) | memory[(Word)(dat + 1)];
+    long off;
 
-    for(i = 0; i < count; i++)
-        memory[(Word)(u + i)] = memory[(Word)(x + i)];
+    // What a real kernel refuses: nothing to do, or a copy that would run
+    // into the vector and I/O pages. Neither is an error.
+    if(count == 0 || (end >> 8) >= 0xfe)
+        return;
+
+    if(!shared_block(blk, &e))
+    {
+        Word i;
+
+        for(i = 0; i < count; i++)
+            memory[(Word)(u + i)] = memory[(Word)(x + i)];
+        return;
+    }
+
+    off = (long)(blk - e.blk) * BLKSIZE + x;
+    memset(&memory[u], 0, count);
+    module_bytes(e.path, e.off + off, &memory[u], count);
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::f_cpymem: %d bytes of %s at %ld\n",
+                count,e.name,off);
 }
 
 /*
@@ -1230,7 +1462,7 @@ void os9::f_link(int nonmapping)
     x += n;
 
     moddir[slot].links++;
-    shared_add(name, NULL);
+    shared_add(name, NULL, 0, 0);
     modregs(moddir[slot].addr, nonmapping);
 
     if(debug_syscall)
@@ -1337,7 +1569,8 @@ void os9::f_load(int nonmapping)
         register_module(base, name);
         // And into the directory the whole machine shares, so that the next
         // process to ask for this module knows where to find it.
-        shared_add(name, (const char *)upath);
+        shared_add(name, (const char *)upath, 0,
+                   (memory[(Word)(base + 2)] << 8) | memory[(Word)(base + 3)]);
     }
 
     modregs(base, nonmapping);
@@ -1988,6 +2221,9 @@ void os9::swi2(void)
             f_crc();
             break;
 
+        case 0x1a:		// F$GModDr
+            f_gmoddr();
+            break;
         case 0x1b:		// F$CpyMem
             f_cpymem();
             break;

@@ -170,6 +170,12 @@ for sysdir in "${SYSDIRS[@]}"; do
                "$sysdir"/motd "$sysdir"/helpmsg "$sysdir"/*.hp
 done
 
+# Which level this root was built from. Not inside CMDS, SYS, DEFS or LIB, so
+# it never shows up in a directory listing a test takes -- but the test runner
+# reads it, since a Level 2 command set does not always print what a Level 1
+# one prints.
+echo "$LEVEL" > "$OS9ROOT/.level"
+
 say "done"
 printf '    CMDS  %4d files\n' "$(ls -1 "$OS9ROOT/CMDS" | wc -l | tr -d ' ')"
 printf '    SYS   %4d files\n' "$(ls -1 "$OS9ROOT/SYS"  | wc -l | tr -d ' ')"
