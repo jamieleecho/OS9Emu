@@ -336,6 +336,24 @@ process that is asking. Ours are not — a forked `mdir` has loaded nothing —
 so on a Level 1 root it still prints a heading over nothing, and that is not
 something `F$GModDr` can fix.
 
+### A module file may hold more than one module
+
+`F$Load` loads every module in the file, not the one whose header comes
+first. The Level 2 `CMDS/shell` is nine merged — `shellplus` and the `date`,
+`deiniz`, `echo`, `iniz`, `link`, `load`, `save` and `unlink` it expects to
+find resident afterwards — so stopping at the first left the other eight
+where they were and the shell's own `load` could never make good on what the
+file was merged for.
+
+The directory therefore remembers **how far into its file each module sits**,
+because a process linking one later has to read back the right one. `Save` is
+the eighth module of `CMDS/shell`, and without the offset a link to it reads
+`shellplus` and calls it `Save`.
+
+The walk ends where the file does, so a file that ends after its last module
+is not an error — `read_module` only complains about a header that is not
+there when the caller was expecting one, which is the first time round.
+
 ### A process id belongs to the machine
 
 The same argument as the module directory, one step on. An OS-9 process id
@@ -568,10 +586,9 @@ see "a shell waits for a signal, not for a read" above. It now runs commands,
 redirects, and exits at end of file, on either root; `tests/cases/shellplus.t`
 is the case that says so.
 
-Something else follows from `shell` being a merged file. `F$Load` loads only
-the *first* module of one — it reads a header, takes `M$Size` from it and
-stops — so the other eight never reach the module directory, and the directory
-is per-process anyway (#1). Real `F$Load` loads every module in the file.
+Something else follows from `shell` being a merged file: `F$Load` has to load
+every module in one, and the directory has to remember where in the file each
+came from. See "a module file may hold more than one module".
 
 With the non-mapping calls reporting `M$Mem` and `F$UnLoad` releasing what it
 is given, the Level 2 shell forks exactly the page counts the Level 1 shell
@@ -603,8 +620,6 @@ serve. They are also the least interesting commands in the set.
 - `F$DatMod` wants a module whose contents are shared, which the shared
   directory deliberately does not give: what is shared is the fact of a
   module, not its bytes.
-- `F$Load` loads only the first module of a file, so the eight that follow
-  `shellplus` in the Level 2 `CMDS/shell` never reach the directory.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,

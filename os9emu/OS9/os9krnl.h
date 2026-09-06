@@ -102,7 +102,9 @@ private:
     int  findmodule(const char *name);
     void reclaim_modules();
     void f_load(int nonmapping);
-    Word load_image(Byte *upath);
+    Word load_image(Byte *upath, long off);
+    Word load_file(Byte *upath);
+    Word read_module(fdes *fd, int required);
     int  register_module(Word base, const char *name);
     void f_mem();
     void f_perr();
