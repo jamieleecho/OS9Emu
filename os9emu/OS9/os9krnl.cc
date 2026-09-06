@@ -32,6 +32,7 @@ extern "C" {
 #include <unistd.h>
 #include <sys/wait.h>
 #include <poll.h>
+#include <sys/mman.h>
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
@@ -92,6 +93,181 @@ static int fd_ready(int fd)
     pfd.events = POLLIN;
     pfd.revents = 0;
     return poll(&pfd, 1, 0) > 0 && pfd.revents != 0;
+}
+
+/*
+ * The system-wide module directory.
+ *
+ * Real OS9 keeps one for the whole machine, and load, link, unlink, mdir and
+ * printerr are written to it: "load echo" is meant to leave echo there for the
+ * next command to find. Each OS9 process here is a host process with its own
+ * copy of the emulated 64K, so a directory kept in that memory belongs to
+ * whoever built it and dies with them -- which is issue #1.
+ *
+ * What is shared is the directory, not the module memory. An OS9 module is
+ * position-independent and re-entrant by rule, so a process that links a
+ * module another process loaded can read it in again at an address of its own
+ * choosing and be no worse off. That leaves the shared part small enough to
+ * be a MAP_SHARED page created before the first fork and inherited by every
+ * process after it, and leaves each process's 64K alone: no window carved out
+ * of the address space, and no ceiling on anybody's data area.
+ *
+ * What it does not give is a module whose *contents* are shared, which is
+ * what F$DatMod would need. A data module has to be writable by everyone who
+ * links it, and that wants real shared pages.
+ */
+#define SHMODS 32
+
+struct sharedmod {
+    char name[32];		// as F$Link asks for it
+    char path[512];		// the OS9 pathlist it was loaded from
+    int  links;			// system-wide link count
+};
+
+struct sharedmoddir {
+    volatile unsigned char lock;
+    int count;
+    struct sharedmod ent[SHMODS];
+};
+
+static struct sharedmoddir *shmods = NULL;
+
+#ifndef MAP_ANON
+#define MAP_ANON MAP_ANONYMOUS
+#endif
+
+static void shared_init(void)
+{
+    void *p = mmap(NULL, sizeof(*shmods), PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_ANON, -1, 0);
+
+    // Without it every process keeps its own directory, which is where we
+    // were before and still works for a program that loads its own modules.
+    if(p == MAP_FAILED)
+        return;
+    memset(p, 0, sizeof(*shmods));
+    shmods = (struct sharedmoddir *)p;
+}
+
+/*
+ * Hold the directory still. The critical sections are a handful of string
+ * compares, so spinning is cheap -- but a process that died inside one would
+ * hang every other, so give up after a while and go in anyway. A torn read of
+ * a module name is a missed link; a machine that never comes back is worse.
+ */
+static int shared_lock(void)
+{
+    long spins;
+
+    if(!shmods)
+        return 0;
+    for(spins = 0; spins < 10000000L; spins++)
+        if(!__atomic_test_and_set(&shmods->lock, __ATOMIC_ACQUIRE))
+            return 1;
+    return 0;
+}
+
+static void shared_unlock(int held)
+{
+    if(held)
+        __atomic_clear(&shmods->lock, __ATOMIC_RELEASE);
+}
+
+static struct sharedmod *shared_find(const char *name)
+{
+    int i;
+
+    for(i = 0; i < SHMODS; i++)
+        if(shmods->ent[i].links > 0 &&
+           strcasecmp(shmods->ent[i].name, name) == 0)
+            return &shmods->ent[i];
+    return NULL;
+}
+
+/*
+ * One more user of a module, recording where it came from if this is the
+ * first. A NULL path only counts a module already there. A path too long to
+ * keep is not an error: the module is in the loader's own memory either way,
+ * and only another process loses by it.
+ */
+static void shared_add(const char *name, const char *path)
+{
+    struct sharedmod *e;
+    int held = shared_lock(), i;
+
+    if(!shmods)
+        return;
+    if((e = shared_find(name)) == NULL)
+    {
+        if(path == NULL)
+        {
+            shared_unlock(held);
+            return;
+        }
+        for(i = 0; i < SHMODS; i++)
+            if(shmods->ent[i].links == 0)
+                break;
+        if(i == SHMODS || strlen(path) >= sizeof(e->path))
+        {
+            shared_unlock(held);
+            return;
+        }
+        e = &shmods->ent[i];
+        snprintf(e->name, sizeof(e->name), "%s", name);
+        snprintf(e->path, sizeof(e->path), "%s", path);
+        e->links = 0;
+        shmods->count++;
+    }
+    e->links++;
+    shared_unlock(held);
+}
+
+// Where a module another process loaded came from, so we can read it in too.
+// A NULL buffer just asks whether the directory has it at all.
+static int shared_path(const char *name, char *path, size_t pathsize)
+{
+    struct sharedmod *e;
+    int held, found = 0;
+
+    if(!shmods)
+        return 0;
+    held = shared_lock();
+    if((e = shared_find(name)) != NULL)
+    {
+        if(path != NULL)
+            snprintf(path, pathsize, "%s", e->path);
+        found = 1;
+    }
+    shared_unlock(held);
+    return found;
+}
+
+/*
+ * One fewer user, and how many are left. At none the module leaves the
+ * directory, as it does on a real system -- and it is up to the caller to
+ * unlink as often as it linked. Minus one means there is no shared directory
+ * to have counted in, and the caller should fall back to its own tally.
+ */
+static int shared_release(const char *name)
+{
+    struct sharedmod *e;
+    int held, left = -1;
+
+    if(!shmods)
+        return -1;
+    held = shared_lock();
+    if((e = shared_find(name)) != NULL)
+    {
+        if((left = --e->links) <= 0)
+        {
+            left = 0;
+            e->links = 0;
+            e->name[0] = '\0';
+            shmods->count--;
+        }
+    }
+    shared_unlock(held);
+    return left;
 }
 
 /*
@@ -182,6 +358,9 @@ os9::os9()
 void os9::init()
 {
     devterm *tmpdev = new devterm("/term","/dev/tty");
+
+    // Before anything forks, so that every process after this inherits it.
+    shared_init();
 
     // Set up stdin, stdout and stderr.
     paths[0] = tmpdev->open(stdin);
@@ -603,13 +782,11 @@ void os9::f_sleep()
  * memory back.
  */
 /*
- * One fewer user of a module, and the space back if that was the last.
+ * Give a module's space back and forget we had it. The link count that says
+ * when to do this is the system-wide one; see shared_release.
  */
 void os9::release_module(int slot)
 {
-    if(--moddir[slot].links > 0)
-        return;
-
     if(debug_syscall)
         fprintf(stderr,"'os9::released %s at %04x\n",
                 moddir[slot].name,moddir[slot].addr);
@@ -625,9 +802,20 @@ void os9::f_unlk()
 
     for(i = 0; i < mod_end; i++)
     {
+        int left;
+
         if(moddir[i].addr != u)
             continue;
-        release_module(i);
+
+        /*
+         * The count belongs to the machine, not to us: another process may
+         * still be linked to this module, and our copy of it has to stay
+         * where it is until nobody is. Without a shared directory to ask,
+         * fall back to the tally we keep ourselves.
+         */
+        left = shared_release(moddir[i].name);
+        if(left == 0 || (left < 0 && --moddir[i].links <= 0))
+            release_module(i);
         return;
     }
     // Unlinking something we never linked is not worth an error: the caller
@@ -660,7 +848,7 @@ void os9::f_unload()
     name[i] = '\0';
 
     slot = findmodule(name);
-    if(slot < 0)
+    if(slot < 0 && !shared_path(name, NULL, 0))
     {
         x = entry;
         sys_error(E_MNF);
@@ -673,7 +861,15 @@ void os9::f_unload()
 
     if(debug_syscall)
         fprintf(stderr,"'os9::f_unload: %s\n",name);
-    release_module(slot);
+
+    // A module this process never had in its own memory is still one it can
+    // hold a link to: the directory is shared even where the memory is not.
+    {
+        int left = shared_release(name);
+
+        if(slot >= 0 && (left == 0 || (left < 0 && --moddir[slot].links <= 0)))
+            release_module(slot);
+    }
 }
 
 /*
@@ -982,6 +1178,32 @@ void os9::f_link(int nonmapping)
     if(slot < 0)
     {
         /*
+         * Not in this process's memory. The directory the machine shares says
+         * whether another process has it and where it came from -- and an OS9
+         * module is position-independent and re-entrant, so reading it in
+         * again here is as good as having been the one who loaded it.
+         */
+        Byte upath[512];
+        Word base;
+
+        if(shared_path(name, (char *)upath, sizeof(upath)))
+        {
+            if((base = load_image(upath)) != 0 &&
+               (slot = register_module(base, name)) >= 0)
+                moddir[slot].links = 0;		// the bump below makes it one
+            else
+            {
+                x = entry;
+                if(!cc.bit.c)
+                    sys_error(E_MemFul);
+                return;
+            }
+        }
+    }
+
+    if(slot < 0)
+    {
+        /*
          * Hand the caller back the X it gave us. Level 1's FLink only writes
          * R$X on the way out with a module; on E$MNF the caller's registers
          * are its own. The shell relies on that: when a link fails it opens
@@ -997,7 +1219,18 @@ void os9::f_link(int nonmapping)
         return;
     }
 
+    /*
+     * A link that found something hands X back past the name it consumed --
+     * "the address of the last byte of the module name, plus 1". A link that
+     * did not hands back the X it was given, which is the branch above. The
+     * two are not the same call from the caller's side: "link a b c" walks
+     * its parameter line by the X that comes back, and with X left where it
+     * started it linked the first name for ever.
+     */
+    x += n;
+
     moddir[slot].links++;
+    shared_add(name, NULL);
     modregs(moddir[slot].addr, nonmapping);
 
     if(debug_syscall)
@@ -1005,29 +1238,30 @@ void os9::f_link(int nonmapping)
                 nonmapping ? " (nm)" : "",name,moddir[slot].addr);
 }
 
-void os9::f_load(int nonmapping)
+/*
+ * Read a module in from an OS9 pathlist and place it at the top of this
+ * process's memory, below anything already there. Returns where it went, or
+ * zero with the error already reported.
+ */
+Word os9::load_image(Byte *upath)
 {
-    Byte upath[512];
     unsigned char modhead[14];
     devdrvr *dev;
     fdes *fd;
-    char name[64];
     Word base, addr, modsize;
     int val;
-
-    x += getpath(&memory[x],upath,1);
 
     dev = find_device(upath);
     if(!dev)
     {
         sys_error(E_MNF);
-        return;
+        return 0;
     }
     fd = dev->open((char*)&upath[strlen(dev->mntpoint)],5,0);
     if(!fd)
     {
         sys_error(dev->errorcode ? dev->errorcode : E_PNNF);
-        return;
+        return 0;
     }
 
     /*
@@ -1044,7 +1278,7 @@ void os9::f_load(int nonmapping)
         fd->close();
         if(fd->usecount == 0) delete fd;
         sys_error(E_BMID);
-        return;
+        return 0;
     }
 
     modsize = (modhead[2] << 8) | modhead[3];
@@ -1055,7 +1289,7 @@ void os9::f_load(int nonmapping)
         fd->close();
         if(fd->usecount == 0) delete fd;
         sys_error(E_MemFul);
-        return;
+        return 0;
     }
 
     memcpy(&memory[base], modhead, 14);
@@ -1067,22 +1301,50 @@ void os9::f_load(int nonmapping)
     if(fd->usecount == 0) delete fd;
 
     modtop = base;
+    return base;
+}
 
-    if(mod_end < (int)(sizeof(moddir)/sizeof(moddir[0])) &&
-       modname(base, name, sizeof(name)))
+/*
+ * Remember a module this process now holds, and hand back its slot.
+ */
+int os9::register_module(Word base, const char *name)
+{
+    Word modsize = (Word)((memory[(Word)(base + 2)] << 8) |
+                           memory[(Word)(base + 3)]);
+
+    if(mod_end >= (int)(sizeof(moddir)/sizeof(moddir[0])))
+        return -1;
+    snprintf(moddir[mod_end].name, sizeof(moddir[mod_end].name), "%s", name);
+    moddir[mod_end].addr = base;
+    moddir[mod_end].end = (Word)(base + modsize);
+    moddir[mod_end].links = 1;
+    return mod_end++;
+}
+
+void os9::f_load(int nonmapping)
+{
+    Byte upath[512];
+    char name[64];
+    Word base;
+
+    x += getpath(&memory[x],upath,1);
+
+    if((base = load_image(upath)) == 0)
+        return;
+
+    if(modname(base, name, sizeof(name)))
     {
-        snprintf(moddir[mod_end].name, sizeof(moddir[mod_end].name), "%s", name);
-        moddir[mod_end].addr = base;
-        moddir[mod_end].end = (Word)(base + modsize);
-        moddir[mod_end].links = 1;
-        mod_end++;
+        register_module(base, name);
+        // And into the directory the whole machine shares, so that the next
+        // process to ask for this module knows where to find it.
+        shared_add(name, (const char *)upath);
     }
 
     modregs(base, nonmapping);
 
     if(debug_syscall)
-        fprintf(stderr,"'os9::f_load%s: %s type=%02X at %04x size %d\n",
-                nonmapping ? " (nm)" : "",(char*)upath,a,base,modsize);
+        fprintf(stderr,"'os9::f_load%s: %s type=%02X at %04x\n",
+                nonmapping ? " (nm)" : "",(char*)upath,a,base);
 }
 
 /*

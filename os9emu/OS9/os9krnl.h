@@ -94,6 +94,8 @@ private:
     int  findmodule(const char *name);
     void reclaim_modules();
     void f_load(int nonmapping);
+    Word load_image(Byte *upath);
+    int  register_module(Word base, const char *name);
     void f_mem();
     void f_perr();
     void f_prsnam();
