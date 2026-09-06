@@ -4,7 +4,8 @@
       "../nitros9",
       "../reversi",
       "~/Applications/mame",
-      "~/OS9"
+      "~/OS9",
+      "~/OS9L2"
     ],
     "deny": [
       "Read(~/.ssh/**)",
@@ -39,6 +40,7 @@
         "../nitros9",
         "../reversi",
         "~/OS9",
+        "~/OS9L2",
         "~/Applications/mame",
         "~/Library/Developer/Xcode/DerivedData",
         "~/Library/Caches"
@@ -51,6 +53,7 @@
         "../nitros9",
         "../reversi",
         "~/OS9",
+        "~/OS9L2",
         "~/Applications/mame",
         "~/Library/Developer",
         "~/Library/Caches",
