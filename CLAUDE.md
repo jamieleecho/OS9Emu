@@ -77,18 +77,30 @@ what "pwd and pxd print only the device name" used to mean.
 
 `dir` seeks straight past both entries, so it never noticed either way.
 
-### Dots are components, not characters
+### Dots are components, and a run of them counts
 
-`.` is this directory and `..` is the parent, and only when they are a whole
-component: `.profile`, `a.b` and `...` are names. `canonicalizePath` used to
-work by counting dots as it went, which got all of it wrong — `/dd/T1/..`
-came back as `/dd/T1`, so `chd ..` stayed where it was and `dir T1/..` listed
-`T1`; `/dd/./T1` kept its dot; and a `.` inside a name after any earlier
-hidden name ate a whole directory component.
+A component of nothing but dots goes up one level for every dot after the
+first: `.` stays put, `..` is the parent, `...` the grandparent, `....` its
+parent, for as long as the run goes on. It is how a shell walks a path back
+up without a call for it — shellplus carries a forty-character string of dots
+and points further back into it at each step (`L1732`, used by `CmdPWD` in
+`../nitros9/level1/cmds/shellplus.asm`), and RBF counts the run and rewrites
+it (`GtDvcNam` in `../nitros9/level1/modules/rbf.asm`). Reading three dots as
+a name, which we used to, let one level of shellplus's prompt work and not
+two, so its prompt stopped dead after a `chd` two directories down. A file
+actually named `...` is unreachable, here as on a real system.
 
-`..` stops at the mount point, so no path walks out of the OS-9 disk and into
-the rest of the host filesystem, and the root comes out as its own parent —
-which is what OS-9 does and what `pwd` needs to know when to stop.
+The rule is about a component that is *nothing but* dots, not about what one
+starts with: `.profile`, `a.b` and `..hidden` are names.
+
+`canonicalizePath` used to work by counting dots as it went, which got all of
+it wrong — `/dd/T1/..` came back as `/dd/T1`, so `chd ..` stayed where it was
+and `dir T1/..` listed `T1`; `/dd/./T1` kept its dot; and a `.` inside a name
+after any earlier hidden name ate a whole directory component.
+
+The run stops at the mount point, so no path walks out of the OS-9 disk and
+into the rest of the host filesystem, and the root comes out as its own parent
+— which is what OS-9 does and what `pwd` needs to know when to stop.
 
 `I$ChgDir` resolves the dots before it stores the name. Keeping `/h0/T1/..`
 as it stood left the working directory a component longer after every `chd`.
@@ -425,7 +437,7 @@ what "unknown service calls must not be fatal" bought.
 `level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
 delta from a Level 1 one. 101 modules against 93.
 
-### The Level 2 shell, and what is left after it
+### The Level 2 shell, and what it took
 
 `CMDS/shell` in the Level 2 port is not one module but nine merged:
 `shellplus` and the `date`, `deiniz`, `echo`, `iniz`, `link`, `load`, `save`
@@ -442,18 +454,11 @@ is per-process anyway (#1). Real `F$Load` loads every module in the file.
 
 With the non-mapping calls reporting `M$Mem` and `F$UnLoad` releasing what it
 is given, the Level 2 shell forks exactly the page counts the Level 1 shell
-does, and the C compiler runs on a Level 2 root. `make test-l2` is 18 of 19.
+does, and the C compiler runs on a Level 2 root.
 
-The one case left is `dots`, and it is a real gap rather than a Level 2 one.
-shellplus builds the directory in its prompt by walking up with a **run of
-dots** — it carries a forty-character string of them and points further back
-into it for each level (`L1732` in `../nitros9/level1/cmds/shellplus.asm`) —
-so the grandparent is `...` and not `../..`. We treat a run of three or more
-dots as a name, which is what the OS-9 pathlist rules say it is not: `.` is
-this directory and each dot after the first goes up one more level. RBF counts
-them and rewrites (`GtDvcNam` in `../nitros9/level1/modules/rbf.asm`). One
-level of prompt works and two do not, which is why the case fails only after
-a `chd` two deep.
+With runs of dots reading as the pathlist components they are — the last
+thing shellplus needed, for the directory in its prompt — it is 19 of 19, the
+same as Level 1. See "dots are components, and a run of them counts".
 
 `tests/cases/shell.t`, `dots.t` and `progpath.t` fold the shell's identity
 away, so the same golden files serve either root: shellplus writes the first
@@ -480,7 +485,3 @@ serve. They are also the least interesting commands in the set.
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
   `tsmon`, `edit` — sit waiting for input the test harness never sends.
-- A run of three or more dots is a pathlist component that goes up that many
-  levels less one, and we read it as a name. The Level 2 shell builds the
-  directory in its prompt that way, so its prompt stops working two levels
-  down — see "Level 2" above.
