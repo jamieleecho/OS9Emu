@@ -15,7 +15,7 @@ NitrOS-9 sources next door in `../nitros9`.
 Makefile              build, test, survey, build the OS-9 root
 coco-dev              docker wrapper for the NitrOS-9 toolchain
 os9emu/OS9/           the emulator (and an Xcode project over the same sources)
-scripts/os9root.sh    build ../nitros9 into ~/OS9
+scripts/os9root.sh    build ../nitros9 into ~/OS9 (--level 2 into ~/OS9L2)
 scripts/survey.sh     run every installed command, report how each fared
 scripts/mame-console.sh   drive a real NitrOS-9 in MAME for ground truth
 tests/run.sh          golden-output tests
@@ -24,7 +24,9 @@ tests/mame/           the MAME side of the comparison harness
 ```
 
 `make check` builds the OS-9 root and runs the tests. `make survey` is the
-broad view: it runs all ~93 installed commands and buckets them.
+broad view: it runs all ~93 installed commands and buckets them. `make
+os9root-l2`, `make test-l2` and `make survey-l2` do the same against a Level 2
+root — see "Level 2" below.
 
 ## The pieces that had to be right
 
@@ -324,6 +326,93 @@ map with the used clusters at the front so the free space reads as one run.
 An OS-9 sector number is 24 bits, so a large host filesystem is reported
 scaled down — the proportions are right, the absolute numbers cannot be.
 
+## Level 2
+
+`scripts/os9root.sh --level 2` builds the Level 2 "coco3" port into a root of
+its own, `~/OS9L2`, so it can be built and surveyed without disturbing the
+Level 1 one. Both ports are plain 6809; the 6309 ports are not.
+
+### The memory model here is already Level 2's
+
+Level 1 puts every process in one 64K address space. Here `F$Fork` is a host
+`fork()`, so **every OS-9 process already has a private 64K** — which is Level
+2's model, not Level 1's. What is missing is the other half of Level 2: the
+parts a real system deliberately shares. The module directory, data modules,
+the process table. That is issue #1 seen from the other end, and it is the
+gate on most of the rest.
+
+### Level 2's utilities ask; Level 1's read the kernel
+
+This is what makes Level 2 the easier of the two to host.
+
+| | Level 1 | Level 2 |
+|---|---|---|
+| `mdir`  | `ldx >D.ModDir` | `F$GModDr` |
+| `procs` | `ldx >D.Proc`   | `F$GBlkMp`, `F$ID`, `F$GPrDsc`, `F$CpyMem` |
+| `mfree` | —               | `F$GBlkMp` |
+
+Under Level 2 those tables live in another address space, so the utilities
+cannot walk them and have to ask the kernel for a copy instead. We have no
+direct page worth reading, but we can answer a question. All three run to
+completion today and print correct headings with nothing under them, because
+the calls they ask answer `E$UnkSvc` and the utilities carry on — which is
+what "unknown service calls must not be fatal" bought.
+
+`level2/coco3/cmds` assembles most of its modules straight out of
+`level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
+delta from a Level 1 one. 101 modules against 93.
+
+### Every Level 2 failure so far is the shell
+
+`tests/run.sh` against the Level 2 root passes 12 of its 18 cases, and all six
+failures trace back to `CMDS/shell`. There are two separate problems in there.
+
+**shellplus waits for a signal that never comes.** `CMDS/shell` in the Level 2
+port is not one module but nine merged: `shellplus` and the `date`, `deiniz`,
+`echo`, `iniz`, `link`, `load`, `save` and `unlink` it expects to find resident
+afterwards. It reads its terminal the way OS-9 asks you to — `SS.SSig` ($1A)
+on path 0, to have the driver signal it when a key arrives, then `F$Sleep`
+with X=0 to sleep until signalled. Our `F$Sleep(0)` is `wait()` for a child,
+there is no child, and `F$Icpt` ($09) is ignored — so the signal has nowhere
+to be delivered and nothing to deliver it. shellplus prints its banner and its
+prompt, never issues a read, and spins at 100% CPU. That is `shell`, `dots`
+and `progpath`.
+
+Something else follows from `shell` being a merged file. `F$Load` loads only
+the *first* module of one — it reads a header, takes `M$Size` from it and stops
+— so the other eight never reach the module directory, and the directory is
+per-process anyway (#1). Real `F$Load` loads every module in the file.
+
+**The Level 2 `shell_21` asks for the whole address space.** Substituting
+`shell_21` — assembled from the same source as Level 1's, but against the
+Level 2 defs, and a different binary for it — fixes those three cases and
+leaves `cc`, `dirlive` and `dirslots`, which die in `c.prep` with **grab
+overlap**. The trace says why:
+
+```
+'os9::f_fork: 255 pages requested       <- Level 2 shell_21
+'os9::f_fork: 2 pages requested         <- Level 1 shell_21
+```
+
+Level 2 gives every process its own 64K map and allocates only the blocks it
+touches, so its shell asks for all of it and means nothing by it. We take the
+request literally, `uppermem` lands at `MEMTOP`, and there is nothing left for
+`F$Mem` to add — which is exactly the ground the C runtime's `sbrk` allocates
+out of. See "memory layout is not a detail" above; this is that same bargain,
+broken from the other side. Dropping the Level 1 shell into the Level 2 root
+passes `cc` unchanged, so nothing else in the root is implicated.
+
+A process whose data area is asked to fill the address space needs headroom
+reserved above it regardless, or `F$Mem` has no answer to give.
+
+### What to leave alone
+
+The ill-behaved end of Level 2 is a tidy set to ignore: `dmem`, `pmap`,
+`smap`, `mmap`, `modpatch` and `proc` want `F$Move`, `F$LDABX`, `F$STABX` and
+a real block map — the calls that reach into *another* process's address
+space, which is exactly what a private-64K-per-host-process model cannot
+serve. They are also the least interesting commands in the set.
+
 ## Known gaps
 
 - No signals between processes. `F$Send` delivers a kill; the keyboard signals
@@ -334,3 +423,6 @@ scaled down — the proportions are right, the absolute numbers cannot be.
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
   `tsmon`, `edit` — sit waiting for input the test harness never sends.
+- `SS.SSig`, `F$Icpt` and `F$Sleep(0)` do not add up to a delivered signal, so
+  the Level 2 shell never reads its terminal, and a data area asked to fill
+  the address space leaves `F$Mem` nothing to grow — see "Level 2" above.

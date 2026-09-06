@@ -71,6 +71,20 @@ make os9root         # builds ../nitros9 into ~/OS9
 make check           # the above, then the tests
 ```
 
+The Level 2 command set builds into a root of its own, so the two can be
+compared without either disturbing the other:
+
+```sh
+make os9root-l2      # builds the Level 2 "coco3" port into ~/OS9L2
+make survey-l2       # runs every command in it and reports how each fared
+```
+
+Most of Level 2's modules are the same sources as Level 1's. The ones that
+differ are the more interesting for an emulator, not less: `mdir`, `procs` and
+`mfree` there ask the kernel for a copy of its tables, where their Level 1
+counterparts read them straight out of the direct page. `CLAUDE.md` has the
+detail.
+
 `./coco-dev` runs a command inside the `jamieleecho/coco-dev` container if you
 would rather not install the toolchain on the host.
 
@@ -100,7 +114,7 @@ Two things surprise people, and neither is a bug:
 
 ```
 os9emu/OS9/           the emulator sources (and an Xcode project over them)
-scripts/os9root.sh    build the OS-9 root from ../nitros9
+scripts/os9root.sh    build the OS-9 root from ../nitros9 (--level 1 or 2)
 scripts/survey.sh     run every installed command and report how each fared
 scripts/mame-console.sh   drive a real NitrOS-9 under MAME, for comparison
 tests/run.sh          golden-output tests
