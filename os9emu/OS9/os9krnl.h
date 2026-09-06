@@ -19,6 +19,8 @@
  */
 #define DESMAX 16 // Whatever _NFILE is set to in os9's stdio.h
 
+#include "os9config.h"
+
 class os9 : virtual public mc6809 {
 private:
     fdes *paths[DESMAX];
@@ -29,14 +31,33 @@ private:
     int lowermem;
     devdrvr *devices[32]; // devices, typically /d0,/h0 etc.
     int dev_end;
+
+    /*
+     * Modules brought in by F$Load, so F$Link can find them again. Real OS9
+     * keeps one of these system-wide; ours belongs to the running process,
+     * which is as far as a one-program-per-emulator model reaches.
+     *
+     * They are placed at the top of memory and grow downwards, with modtop
+     * marking the lowest one. The process data area is not allowed past it.
+     */
+    struct modent {
+        char name[32];
+        Word addr;		// module header
+        Word end;		// first byte past it
+        int  links;
+    };
+    modent moddir[32];
+    int mod_end;
+    int modtop;
     pid_t pids[32]; // Mapping of Proces identifiers
     int pid_end;
     
 public:
-    void     loadmodule(const char *,const char *);
-    
+    void     init();
+    void     loadmodule(const char *,const char *,int pages = 0);
+
     // Public constructor and destructor
-    
+
     os9();
     ~os9();
     
@@ -47,10 +68,16 @@ private:
     int sys_error(Byte);
     void f_chain();
     void i_chgdir();
+    void f_cmpnam();
+    void f_cpymem();
     void f_crc();
     void f_fork();
+    void f_send();
     void f_id();
     void f_link();
+    int  modname(Word base, char *out, size_t outsz);
+    int  findmodule(const char *name);
+    void reclaim_modules();
     void f_load();
     void f_mem();
     void f_perr();

@@ -57,6 +57,8 @@ public:
 class fdunix: public fdes {
 public:
     FILE *fp;
+    int dcp;		// byte offset of our entry in the parent directory,
+			// or -1 if we could not work it out (PD.DCP)
     
     virtual ~fdunix();
     fdunix();
@@ -75,12 +77,47 @@ public:
     os9dentry *dentries;
     int offset;
     int length;
-    
+    char hostdir[1024];		// the host directory these entries came from
+
     virtual ~fdirunix();
     fdirunix();
+    int isdir() { return 1; }
     int close();
     int read(Byte *,int);
+    int write(Byte *,int);
+    int writeln(Byte *,int);
+    int seek(int);
     int getstatus (int, statusbuf *);
+
+    // Read an entry's name back out of OS9 form
+    static void entryname(const os9dentry *, char *, size_t);
+};
+
+/*
+ * The "entire device" path -- /d0@ -- which OS9 uses to read a disk's raw
+ * sectors. There is no disk here, only a host directory, so what this serves
+ * is a plausible OS9 disk built out of what the host filesystem reports:
+ * an identification sector at LSN 0 and an allocation bitmap from LSN 1.
+ *
+ * free(1) is what wants it, and what it wants is the capacity, the cluster
+ * size and enough of a bitmap to count the free space and the largest run.
+ */
+class fdwhole: public fdes {
+public:
+    unsigned char *image;
+    int length;
+    int offset;
+
+    fdwhole(const char *hostdir, const char *volname);
+    virtual ~fdwhole();
+    int close();
+    int read(Byte *,int);
+    int readln(Byte *,int);
+    int write(Byte *,int);
+    int writeln(Byte *,int);
+    int seek(int);
+    int getstatus(int, statusbuf *);
+    int setstatus(int, statusbuf *);
 };
 
 class devterm: public devdrvr {

@@ -22,6 +22,7 @@ extern "C" {
 //#include <malloc.h>
 }
 #include "devdrvr.h"
+#include "errcodes.h"
 
 /*
  * The file descriptor class contains the resources necesary for
@@ -42,19 +43,48 @@ int fdes::close()
     return 0;
 }
 
+/*
+ * A driver that does not recognise a status code reports E_UnkSvc and carries
+ * on. Callers are written for that -- dir asks every device for its screen
+ * width and just keeps its default when the answer is an error.
+ */
 int fdes::getstatus(int opcode,statusbuf *buf)
 {
+    errorcode = E_UnkSvc;
     return -1;
 }
 
 int fdes::setstatus(int opcode,statusbuf *buf)
 {
+    errorcode = E_UnkSvc;
     return -1;
 }
 
 int fdes::seek(int offset)
 {
     return -1;
+}
+
+/*
+ * SS_DevNm: the name of the device behind this path, as OS-9 spells it --
+ * no leading slash, and high-bit terminated the way every other name in the
+ * system is.
+ */
+void fdes::devname(statusbuf *status)
+{
+    const char *nm = driver ? driver->mntpoint : "";
+    size_t i, len;
+
+    memset(status, '\0', sizeof(*status));
+    if(*nm == '/')
+        nm++;
+    len = strlen(nm);
+    if(len > sizeof(status->filler) - 1)
+        len = sizeof(status->filler) - 1;
+    for(i = 0; i < len; i++)
+        status->filler[i] = nm[i];
+    if(len)
+        status->filler[len - 1] |= 0x80;
 }
 
 /*

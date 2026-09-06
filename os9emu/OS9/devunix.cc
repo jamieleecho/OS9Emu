@@ -24,9 +24,16 @@ extern "C" {
 #include <stdlib.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <time.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <sys/statvfs.h>
 }
 #include "devdrvr.h"
 #include "devunix.h"
+#include "errcodes.h"
+#include "os9config.h"
 
 
 static int
@@ -67,17 +74,20 @@ o2u_attr(int omode)
 static const char *findpathseg(const char *dir, const char *segment)
 {
     DIR *dirp;
-    struct dirent *dp;
+    struct dirent *dp = NULL;
     static char dirname[1024];
-    
+
     dirp = opendir(dir);
+    if(dirp == NULL)		// not a directory, or we may not read it
+        return NULL;
     while((dp = readdir(dirp)))
     {
         if(strcasecmp(dp->d_name,segment) == 0)
             break;
     }
     if(dp) {
-        strncpy(dirname, dp->d_name, sizeof(dir));
+        strncpy(dirname, dp->d_name, sizeof(dirname) - 1);
+        dirname[sizeof(dirname) - 1] = '\0';
     }
     closedir(dirp);
     if(dp)
@@ -86,41 +96,53 @@ static const char *findpathseg(const char *dir, const char *segment)
         return NULL;
 }
 
-static char *findpath(char *path,bool mustexist)
+/*
+ * OS9 names are case insensitive, so the name a program asks for may differ
+ * in case from the one on disk. Rewrite each segment to its real spelling.
+ *
+ * Only the part of the path below rootlen is searched: everything above it is
+ * the mount point we were configured with, which is a host path and is used
+ * verbatim. Scanning it would mean listing directories we have no business
+ * reading -- and failing to open any one of them used to crash us.
+ *
+ * A match differs from the requested segment only in case, so it always has
+ * the same length and can be written back in place.
+ */
+static char *findpath(char *path, size_t rootlen, bool mustexist)
 {
-    char *endp, *endseg, *begseg;
-    const char *dirp, *nseg;
-    
-    endp = path + strlen(path);
-    
-    if(*path == '/')
+    char *seg = path + rootlen;
+
+    while(*seg == '/')
+        seg++;
+
+    while(*seg)
     {
-        dirp = "/";
-        begseg = path + 1;
+        char *end = strchr(seg, '/');
+        char endsave = '\0';
+        char sepsave;
+        const char *real;
+
+        if(end) {
+            endsave = *end;
+            *end = '\0';
+        }
+
+        // Terminate the parent prefix so it can be opened as a directory
+        sepsave = seg[-1];
+        seg[-1] = '\0';
+        real = findpathseg(path[0] ? path : "/", seg);
+        seg[-1] = sepsave;
+
+        if(real)
+            memcpy(seg, real, strlen(seg));
+        else if(end || mustexist)
+            return NULL;		// a parent is missing, or we needed a hit
+
+        if(!end)
+            break;
+        *end = endsave;
+        seg = end + 1;
     }
-    else
-    {
-        dirp = ".";
-        begseg = path;
-    }
-    
-    do {
-        endseg=strchr(begseg,'/');
-        if(endseg == NULL)
-            endseg = endp;
-        *endseg = '\0';
-        nseg = findpathseg(dirp, begseg);
-        if(endseg != endp && !nseg)
-            return NULL;
-        if(nseg)
-            strcpy(begseg,nseg);
-        if(dirp == path)
-            begseg[-1] = '/';
-        dirp = path;
-        begseg = endseg +1;
-    } while(endseg != endp);
-    if(mustexist && !nseg)
-        return NULL;
     return path;
 }
 
@@ -214,13 +236,61 @@ struct {
                 break;
         }
         if (fid == size) {
-            strcpy(files[fid].name, buf);
+            // The table is what stands in for OS9 sector numbers. It is fixed
+            // in size, so past the end every further name shares the last slot
+            // rather than running off the array.
+            if (size >= (int)(sizeof(files)/sizeof(files[0])))
+                return size - 1;
+            snprintf(files[fid].name, sizeof(files[fid].name), "%s", buf);
             size++;
         }
-        
+
         return fid;
     }
 } fileTable;
+
+/*
+ * Where a file's entry sits in its parent directory, as a byte offset.
+ *
+ * OS9 reports this as PD.DCP in the path options, and rename(1) uses it to
+ * seek straight to the entry and write a new name over it. The enumeration
+ * has to match the one devunix::open builds for a directory path -- "." and
+ * ".." first, then the directory's own order -- or the seek lands on the
+ * wrong file.
+ */
+static int direntry_offset(const char *hostpath)
+{
+    char dirpart[1024];
+    const char *base;
+    DIR *dir;
+    struct dirent *entry;
+    int index = 2;		// "." and ".." occupy the first two slots
+
+    base = strrchr(hostpath, '/');
+    if(base == NULL)
+        return -1;
+    if((size_t)(base - hostpath) >= sizeof(dirpart))
+        return -1;
+    memcpy(dirpart, hostpath, base - hostpath);
+    dirpart[base - hostpath] = '\0';
+    base++;
+
+    dir = opendir(dirpart[0] ? dirpart : "/");
+    if(dir == NULL)
+        return -1;
+
+    while((entry = readdir(dir)) != NULL) {
+        if(strcmp(".", entry->d_name) == 0) continue;
+        if(strcmp("..", entry->d_name) == 0) continue;
+        if(strcmp(base, entry->d_name) == 0) {
+            closedir(dir);
+            return index * (int)sizeof(os9dentry);
+        }
+        index++;
+    }
+    closedir(dir);
+    return -1;
+}
 
 
 /* Open a file
@@ -232,28 +302,50 @@ fdes *devunix::open(const char *path,int mode,int create)
     char buf[1024];
     const char *umode;
     
+    /*
+     * "@" on the end of a device name asks for the whole device -- the raw
+     * sectors. There is no disk behind us, so serve a plausible one built
+     * from what the host filesystem reports; free(1) is what asks.
+     */
+    if (!create && (strcmp(path, "@") == 0 || strcmp(path, "/@") == 0)) {
+        const char *vol = strrchr(unixdir, '/');
+        fdwhole *fd = new fdwhole(unixdir, vol ? vol + 1 : unixdir);
+        fd->usecount = 1;
+        fd->driver = this;
+        return fd;
+    }
+
     snprintf(buf, sizeof(buf), "%s%s", unixdir, path);
     canonicalizePath(buf, buf);
-    
-    if (!findpath(buf,!create))
+
+    if (!findpath(buf,strlen(unixdir),!create))
     {
-        errorcode = 216;
+        errorcode = E_PNNF;
         return 0;
     }
-    switch(mode & 3)
-    {
-        case 0:
-        case 1: umode="rb";
-            break;
-        case 2: umode="wb";
-            break;
-        case 3: umode=(create)?"wb+":"rb+";
-            break;
-    }
-    
+
+    /*
+     * OS9 access modes: 1 = read, 2 = write, 3 = update.
+     *
+     * I$Open never truncates -- that is what I$Create is for -- so opening
+     * for write alone still has to be "rb+". Getting this wrong emptied every
+     * file a program opened to rewrite in place, attr(1) among them.
+     */
+    if (create)
+        umode = "wb+";
+    else if ((mode & 3) == 1 || (mode & 3) == 0)
+        umode = "rb";
+    else
+        umode = "rb+";
+
     // First open the file/or directory
     FILE *fp = fopen(buf,umode);
-    
+    if (fp == NULL && !create && (mode & 3) != 1) {
+        // Read-only on disk, or a directory, which cannot be opened "rb+".
+        // OS9 reports the failure when the write is attempted, not here.
+        fp = fopen(buf, "rb");
+    }
+
     // Are we actually trying to open a directory?
     fdunix *fd;
     DIR *dir = opendir(buf);
@@ -283,11 +375,26 @@ fdes *devunix::open(const char *path,int mode,int create)
         fdirunix *fdir = new fdirunix;
         fdir->dentries = dentries;
         fdir->length = numEntries * sizeof(os9dentry);
+        // Remembered so a rewritten entry can be turned into a host rename.
+        snprintf(fdir->hostdir, sizeof(fdir->hostdir), "%s", buf);
         fd = fdir;
     } else {
-        fd =  new fdunix;
+        if (fp == NULL) {
+            // Not a directory and we could not open it. Say why, since the
+            // caller shows the error to the user.
+            switch (errno) {
+                case EACCES: errorcode = E_FNA;   break;
+                case EISDIR: errorcode = E_BMode; break;
+                case ENOENT: errorcode = E_PNNF;  break;
+                default:     errorcode = E_PNNF;  break;
+            }
+            return 0;
+        }
+        fdunix *plain = new fdunix;
+        plain->dcp = direntry_offset(buf);
+        fd = plain;
     }
-    
+
     // Common initialization
     fd->fp = fp;
     fd->usecount=1;
@@ -342,19 +449,21 @@ int devunix::chdir(char *path)
 
 fdunix::fdunix()
 {
+    fp = NULL;
+    dcp = -1;
 }
 
 
 fdunix::~fdunix()
 {
-    if(usecount)
+    if(usecount && fp)
         fclose(fp);
     usecount--;
 }
 
 int fdunix::close()
 {
-    if(usecount == 1)
+    if(usecount == 1 && fp)
         fclose(fp);
     usecount--;
     return 0;
@@ -362,7 +471,11 @@ int fdunix::close()
 
 int fdunix::read(Byte *buf, int size)
 {
-    int c = (int)fread((char*)buf, 1, size, fp);
+    int c;
+
+    if(!fp)
+        return (errorcode = E_BMode), -1;
+    c = (int)fread((char*)buf, 1, size, fp);
     if(c == 0)
     {
         errorcode = 211;
@@ -378,7 +491,9 @@ int fdunix::readln(Byte *buf, int size)
 {
     Byte *p,*maxp;
     int y,c;
-    
+
+    if(!fp)
+        return (errorcode = E_BMode), -1;
     if(feof(fp))
     {
         errorcode = 211;
@@ -405,7 +520,9 @@ int fdunix::readln(Byte *buf, int size)
 int fdunix::write(Byte *buf, int size)
 {
     int inx;
-    
+
+    if(!fp)
+        return (errorcode = E_BMode), -1;
     for(inx = 0; inx < size; inx++)
     {
         if(fputc(buf[inx],fp) == -1)
@@ -428,7 +545,9 @@ int fdunix::write(Byte *buf, int size)
 int fdunix::writeln(Byte *buf, int size)
 {
     int inx;
-    
+
+    if(!fp)
+        return (errorcode = E_BMode), -1;
     for(inx = 0; inx < size;)
     {
         fputc(((char*)buf)[inx],fp);
@@ -440,9 +559,57 @@ int fdunix::writeln(Byte *buf, int size)
 
 int fdunix::seek(int offset)
 {
+    if(!fp)
+        return (errorcode = E_BMode);
     fflush(fp);
-    fseek(fp, offset, SEEK_SET);
+    if(fseek(fp, offset, SEEK_SET) == -1)
+        return (errorcode = E_Sect);
     return 0;
+}
+
+/*
+ * Fill in an RBF file descriptor sector, which is what SS_FD hands back:
+ *
+ *   $00 FD.ATT   attributes: d s pe pw pr e w r
+ *   $01 FD.OWN   owner id                     (2 bytes)
+ *   $03 FD.DAT   last modified: Y M D H M     (5 bytes, year is -1900)
+ *   $08 FD.LNK   link count
+ *   $09 FD.SIZ   file size                    (4 bytes)
+ *   $0d FD.Creat created: Y M D               (3 bytes)
+ *   $10 FD.SEG   segment list
+ *
+ * We have no sectors to describe, so the segment list stays zero -- which is
+ * how a reader is told there are no more segments.
+ */
+static void fill_fd_sector(statusbuf *status, const struct stat *st)
+{
+    struct tm *tm;
+    time_t mtime = st->st_mtime;
+    time_t ctime = st->st_ctime;
+    unsigned char *fd = status->filler;
+
+    memset(status, '\0', sizeof(*status));
+    fd[0x00] = u2o_attr(st->st_mode);
+    fd[0x01] = 0;		// Owner 0, the super user: attr(1) refuses to
+    fd[0x02] = 0;		// touch a file owned by somebody else, and
+				// F$ID reports us as 0 too.
+    if((tm = localtime(&mtime)) != NULL) {
+        fd[0x03] = tm->tm_year;
+        fd[0x04] = tm->tm_mon + 1;
+        fd[0x05] = tm->tm_mday;
+        fd[0x06] = tm->tm_hour;
+        fd[0x07] = tm->tm_min;
+    }
+    fd[0x08] = st->st_nlink ? st->st_nlink : 1;
+    fd[0x09] = (st->st_size >> 24) & 0xff;
+    fd[0x0a] = (st->st_size >> 16) & 0xff;
+    fd[0x0b] = (st->st_size >> 8) & 0xff;
+    fd[0x0c] = st->st_size & 0xff;
+    if((tm = localtime(&ctime)) != NULL) {
+        fd[0x0d] = tm->tm_year;
+        fd[0x0e] = tm->tm_mon + 1;
+        fd[0x0f] = tm->tm_mday;
+    }
 }
 
 int fdunix::getstatus(int opcode,statusbuf *status)
@@ -450,42 +617,67 @@ int fdunix::getstatus(int opcode,statusbuf *status)
     struct stat statbuf;
     switch (opcode)
     {
-        case 0:  /* Read/Write PD Options */
+        case SS_Opt:  /* Read/Write PD Options */
+            /*
+             * The RBF path options, laid out as defs/rbf.d has them. Only the
+             * fields a hosted program can act on are filled in; the geometry
+             * ones describe a disk we do not have.
+             *
+             *   $00 PD.DTP  device type      $13 PD.ATT  attributes
+             *   $14 PD.FD   file descriptor  $17 PD.DFD  directory descriptor
+             *   $1a PD.DCP  our entry's offset in the parent directory
+             */
             memset(status,'\0',sizeof(*status));
             status->filler[0x00] = 0x1;  /* RBF */
             status->filler[0x03] = 0x80;  /* Winchester disk */
-            if(fstat(fileno(fp), &statbuf) != -1)
+            if(fp && fstat(fileno(fp), &statbuf) != -1)
             {
-                status->filler[0x10] = u2o_attr(statbuf.st_mode); /* Attributes */
-                status->filler[0x11] = statbuf.st_ino >> 16 & 0xff;
-                status->filler[0x12] = statbuf.st_ino >> 8 & 0xff;
-                status->filler[0x13] = statbuf.st_ino & 0xff;
+                status->filler[0x13] = u2o_attr(statbuf.st_mode);
+                status->filler[0x14] = statbuf.st_ino >> 16 & 0xff;
+                status->filler[0x15] = statbuf.st_ino >> 8 & 0xff;
+                status->filler[0x16] = statbuf.st_ino & 0xff;
+            }
+            if(dcp >= 0)
+            {
+                status->filler[0x1a] = (dcp >> 24) & 0xff;
+                status->filler[0x1b] = (dcp >> 16) & 0xff;
+                status->filler[0x1c] = (dcp >> 8) & 0xff;
+                status->filler[0x1d] = dcp & 0xff;
             }
             break;
-        case 2: /* Read/Write File Size */
-            if(fstat(fileno(fp), &statbuf) != -1)
+        case SS_Size: /* Read/Write File Size */
+            if(fp && fstat(fileno(fp), &statbuf) != -1)
                 status->filesize = statbuf.st_size;
             else
-                return(errorcode = 203);
+                return(errorcode = E_BMode);
             break;
-        case 5: /* Get File Current Position */
+        case SS_Pos: /* Get File Current Position */
         {
             status->filesize=ftell(fp);
         }
             break;
-        case 6: /* Test for End of File */
+        case SS_EOF: /* Test for End of File */
         {
-            status->status=feof(fp);
+            // feof() only goes true once a read has already run off the end,
+            // but the caller is asking before it reads. Compare the position
+            // against the size instead.
+            long here = ftell(fp);
+            status->status = 1;
+            if(here >= 0 && fstat(fileno(fp), &statbuf) != -1)
+                status->status = (here >= statbuf.st_size);
         }
             break;
-        case 14: /* Return Device name (32-bytes at [X]) */
-            strcpy((char*) status->filler, driver->mntpoint);
+        case SS_DevNm: /* Return Device name (32-bytes at [X]) */
+            devname(status);
+            break;
+        case SS_FD: /* Return the file descriptor sector */
+            if(!fp || fstat(fileno(fp), &statbuf) == -1)
+                return(errorcode = E_BMode);
+            fill_fd_sector(status, &statbuf);
             break;
 
         default:
-            fprintf(stderr,"Getstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
     return(0);
 }
@@ -494,23 +686,31 @@ int fdunix::setstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
     {
-        case 2:
-            ftruncate(fileno(fp),status->filesize);
+        case SS_Size:
+            if(ftruncate(fileno(fp),status->filesize) == -1)
+                return(errorcode = E_Write);
             return 0;
-            break;
-        case 15:
-        case 28:
-            // Codes 15 and 28 are used by the ar-program.
-            // Probably to set file access mode.
+        case SS_FD:
+            // attr(1) writes back a single byte, FD.ATT. The rest of the
+            // descriptor is derived from the host file, so there is nothing
+            // else here for us to store.
+            if(fchmod(fileno(fp), o2u_attr(status->filler[0])) == -1)
+                return(errorcode = E_Write);
             return 0;
-            break;
+        case SS_Attr:
+            if(fchmod(fileno(fp), o2u_attr(status->status)) == -1)
+                return(errorcode = E_Write);
+            return 0;
+        case SS_Opt:
+            // Path options belong to the path, not to the file behind it.
+            return 0;
+        case SS_Lock:
+        case SS_Ticks:
+            // Record locking: nothing else is contending for the file.
+            return 0;
         default:
-            fprintf(stderr,"Setstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
-            
+            return(errorcode = E_UnkSvc);
     }
-    return 0;
 }
 
 /*********************************************************************
@@ -539,15 +739,121 @@ int fdirunix::close()
 int fdirunix::read(Byte *buf, int size)
 {
     if (offset >= length) {
-        errorcode = 211;
+        errorcode = E_EOF;
         return -1;
     }
-    
+
     size = (size + offset < length) ? size : length - offset;
     memcpy((void *)buf, (Byte *)dentries + offset, size);
-    
+
     offset += size;
     return size;
+}
+
+/*
+ * An entry's name, back in host form: OS9 stores it high-bit terminated and
+ * pads the rest with whatever was there before.
+ */
+void fdirunix::entryname(const os9dentry *e, char *out, size_t outsz)
+{
+    size_t i;
+
+    for(i = 0; i + 1 < outsz && i < sizeof(e->name); i++)
+    {
+        unsigned char c = e->name[i];
+        out[i] = c & 0x7f;
+        if(c & 0x80)
+        {
+            i++;
+            break;
+        }
+        if(c == 0)
+            break;
+    }
+    out[i] = '\0';
+}
+
+/*
+ * Writing to a directory is how OS9 renames a file: the program reads the
+ * entry, changes the name in it and writes it back. Turn that into a host
+ * rename. An entry whose first byte is zero has been deleted, which is how
+ * OS9 removes a directory entry.
+ */
+int fdirunix::write(Byte *buf, int size)
+{
+    int written = 0;
+
+    while(written < size)
+    {
+        int slot = offset / (int)sizeof(os9dentry);
+        int within = offset % (int)sizeof(os9dentry);
+        int chunk = (int)sizeof(os9dentry) - within;
+
+        if(chunk > size - written)
+            chunk = size - written;
+        if(offset + chunk > length)
+        {
+            // We cannot grow a directory this way: entries appear when a file
+            // is created, not when somebody writes past the end.
+            errorcode = E_Full;
+            return written ? written : -1;
+        }
+
+        char oldname[64], newname[64];
+        entryname(&dentries[slot], oldname, sizeof(oldname));
+
+        memcpy((Byte *)&dentries[slot] + within, buf + written, chunk);
+        entryname(&dentries[slot], newname, sizeof(newname));
+
+        if(os9cfg.trace)
+            fprintf(stderr,"'os9::dirwrite: slot %d <%s> -> <%s> in <%s>\n",
+                    slot, oldname, newname, hostdir);
+        if(strcmp(oldname, newname) != 0 && oldname[0] && *hostdir)
+        {
+            char from[2048], to[2048];
+
+            snprintf(from, sizeof(from), "%s/%s", hostdir, oldname);
+            if(newname[0] == '\0')
+            {
+                if(unlink(from) == -1)
+                {
+                    errorcode = E_FNA;
+                    return written ? written : -1;
+                }
+            }
+            else
+            {
+                snprintf(to, sizeof(to), "%s/%s", hostdir, newname);
+                if(rename(from, to) == -1)
+                {
+                    errorcode = (errno == EACCES) ? E_FNA : E_BPNam;
+                    return written ? written : -1;
+                }
+            }
+        }
+
+        offset += chunk;
+        written += chunk;
+    }
+    return written;
+}
+
+// Writing a line to a directory means the same thing as writing bytes to it.
+int fdirunix::writeln(Byte *buf, int size)
+{
+    return write(buf, size);
+}
+
+/*
+ * A directory path is served out of the entry array we built when it was
+ * opened, so seeking moves our own cursor rather than the underlying file.
+ */
+int fdirunix::seek(int newoffset)
+{
+    if(newoffset < 0)
+        return (errorcode = E_BPNam);
+    offset = newoffset;
+    return 0;
 }
 
 int fdirunix::getstatus(int opcode,statusbuf *status)
@@ -555,11 +861,11 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
     struct stat statbuf;
     switch (opcode)
     {
-        case 0:  /* Read/Write PD Options */
+        case SS_Opt:  /* Read/Write PD Options */
             memset(status,'\0',sizeof(*status));
             status->filler[0x00] = 0x1;  /* RBF */
             status->filler[0x03] = 0x80;  /* Winchester disk */
-            if(fstat(fileno(fp), &statbuf) != -1)
+            if(fp && fstat(fileno(fp), &statbuf) != -1)
             {
                 status->filler[0x10] = u2o_attr(statbuf.st_mode); /* Attributes */
                 status->filler[0x11] = statbuf.st_ino >> 16 & 0xff;
@@ -567,29 +873,230 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
                 status->filler[0x13] = statbuf.st_ino & 0xff;
             }
             break;
-        case 2: /* Read/Write File Size */
+        case SS_Size: /* Read/Write File Size */
             status->filesize = length;
             break;
-        case 5: /* Get File Current Position */
-        {
-            status->filesize=ftell(fp);
-        }
+        case SS_Pos: /* Get File Current Position */
+            // A directory is served out of the entry array we built at open
+            // time, not out of fp, so the position is ours to report.
+            status->filesize = offset;
             break;
-        case 6: /* Test for End of File */
-        {
-            return (offset >= length);
-        }
+        case SS_EOF: /* Test for End of File */
+            status->status = (offset >= length);
             break;
-            
-        case 14: /* Return Device name (32-bytes at [X]) */
-            strcpy((char*) status->filler, driver->mntpoint);
+        case SS_DevNm: /* Return Device name (32-bytes at [X]) */
+            devname(status);
+            break;
+        case SS_FD: /* Return the file descriptor sector */
+            if(!fp || fstat(fileno(fp), &statbuf) == -1)
+                return(errorcode = E_BMode);
+            fill_fd_sector(status, &statbuf);
             break;
         default:
-            fprintf(stderr,"Getstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
     return(0);
+}
+
+
+/*********************************************************************
+ * fdwhole methods -- the "entire device" path
+ *********************************************************************/
+
+/*
+ * Build the disk OS9 would have seen, from what the host filesystem reports.
+ *
+ * Layout, from defs/rbf.d:
+ *   $00 DD.TOT  3  total sectors        $0e DD.DSK  2  disk id
+ *   $03 DD.TKS  1  sectors per track    $10 DD.FMT  1  format
+ *   $04 DD.MAP  2  bytes of bitmap      $11 DD.SPT  2  sectors per track
+ *   $06 DD.BIT  2  sectors per cluster  $15 DD.BT   3  bootstrap sector
+ *   $08 DD.DIR  3  root directory FD    $18 DD.BSZ  2  bootstrap size
+ *   $0b DD.OWN  2  owner                $1a DD.DAT  5  creation date
+ *   $0d DD.ATT  1  attributes           $1f DD.NAM 32  volume name
+ * and the allocation bitmap starts at $100, one bit per cluster, used
+ * clusters set, most significant bit first.
+ */
+fdwhole::fdwhole(const char *hostdir, const char *volname)
+{
+    struct statvfs vfs;
+    struct stat st;
+    unsigned long total_sectors, free_sectors, clusters, free_clusters;
+    unsigned long used_clusters, bitmap_bytes, sectors_per_cluster;
+    unsigned long i;
+    unsigned char *dd;
+
+    image = NULL;
+    length = 0;
+    offset = 0;
+
+    total_sectors = 0;
+    free_sectors  = 0;
+    if(statvfs(hostdir, &vfs) == 0) {
+        unsigned long unit = vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize;
+        total_sectors = (unsigned long)((double)vfs.f_blocks * unit / 256.0);
+        free_sectors  = (unsigned long)((double)vfs.f_bavail * unit / 256.0);
+    }
+    if(total_sectors == 0)
+        total_sectors = 1440;			// a floppy, if we cannot ask
+    if(free_sectors > total_sectors)
+        free_sectors = total_sectors;
+
+    // An OS9 sector number is 24 bits.
+    if(total_sectors > 0xffffffUL) {
+        free_sectors = (unsigned long)((double)free_sectors *
+                                       0xffffffUL / total_sectors);
+        total_sectors = 0xffffffUL;
+    }
+
+    /*
+     * Pick a cluster size that keeps the bitmap to at most 8K. A modern host
+     * filesystem holds far more 256-byte sectors than a bit each would fit
+     * in, and free(1) reads the whole map.
+     */
+    sectors_per_cluster = 1;
+    while(total_sectors / sectors_per_cluster > 65536UL)
+        sectors_per_cluster *= 2;
+
+    clusters      = (total_sectors + sectors_per_cluster - 1) / sectors_per_cluster;
+    free_clusters = free_sectors / sectors_per_cluster;
+    if(free_clusters > clusters)
+        free_clusters = clusters;
+    used_clusters = clusters - free_clusters;
+    bitmap_bytes  = (clusters + 7) / 8;
+
+    length = 256 + (int)bitmap_bytes;
+    image = new unsigned char[length];
+    memset(image, 0, length);
+
+    dd = image;
+    dd[0x00] = (total_sectors >> 16) & 0xff;
+    dd[0x01] = (total_sectors >> 8) & 0xff;
+    dd[0x02] = total_sectors & 0xff;
+    dd[0x03] = 18;				// sectors per track
+    dd[0x04] = (bitmap_bytes >> 8) & 0xff;
+    dd[0x05] = bitmap_bytes & 0xff;
+    dd[0x06] = (sectors_per_cluster >> 8) & 0xff;
+    dd[0x07] = sectors_per_cluster & 0xff;
+    dd[0x08] = 0; dd[0x09] = 0; dd[0x0a] = 2;	// root directory FD
+    dd[0x0d] = 0xbf;				// d s pe pw pr e w r
+    dd[0x0e] = 0x4f; dd[0x0f] = 0x39;		// disk id, "O9"
+    dd[0x10] = 0x03;				// double sided, double density
+    dd[0x11] = 0; dd[0x12] = 18;
+    if(stat(hostdir, &st) == 0) {
+        time_t ct = st.st_ctime;
+        struct tm *tm = localtime(&ct);
+        if(tm) {
+            dd[0x1a] = tm->tm_year;
+            dd[0x1b] = tm->tm_mon + 1;
+            dd[0x1c] = tm->tm_mday;
+            dd[0x1d] = tm->tm_hour;
+            dd[0x1e] = tm->tm_min;
+        }
+    }
+
+    {
+        // The volume name, high bit terminated the way OS9 stores names.
+        size_t n = strlen(volname);
+        if(n > 31) n = 31;
+        if(n == 0) { volname = "OS9"; n = 3; }
+        memcpy(&dd[0x1f], volname, n);
+        dd[0x1f + n - 1] |= 0x80;
+    }
+
+    // The bitmap: used clusters first, so the free space is one run and
+    // free(1) reports a sensible largest block.
+    for(i = 0; i < used_clusters; i++)
+        image[256 + i / 8] |= (unsigned char)(0x80 >> (i % 8));
+    // Clusters past the end of the disk are marked in use, as on a real one.
+    for(i = clusters; i < bitmap_bytes * 8; i++)
+        image[256 + i / 8] |= (unsigned char)(0x80 >> (i % 8));
+}
+
+fdwhole::~fdwhole()
+{
+    delete [] image;
+}
+
+int fdwhole::close()
+{
+    usecount--;
+    return 0;
+}
+
+int fdwhole::read(Byte *buf, int size)
+{
+    if(offset >= length)
+        return (errorcode = E_EOF), -1;
+    if(size > length - offset)
+        size = length - offset;
+    memcpy(buf, image + offset, size);
+    offset += size;
+    return size;
+}
+
+int fdwhole::readln(Byte *buf, int size)
+{
+    return read(buf, size);
+}
+
+int fdwhole::write(Byte *buf, int size)
+{
+    // The image is ours, not the host's: there is nothing here to write to.
+    return (errorcode = E_WP), -1;
+}
+
+int fdwhole::writeln(Byte *buf, int size)
+{
+    return write(buf, size);
+}
+
+int fdwhole::seek(int newoffset)
+{
+    if(newoffset < 0)
+        return (errorcode = E_Sect);
+    offset = newoffset;
+    return 0;
+}
+
+int fdwhole::getstatus(int opcode, statusbuf *status)
+{
+    switch(opcode)
+    {
+        case SS_Opt:
+            memset(status, '\0', sizeof(*status));
+            status->filler[0x00] = 0x1;		// RBF
+            status->filler[0x03] = 0x80;
+            break;
+        case SS_Size:
+            status->filesize = length;
+            break;
+        case SS_Pos:
+            status->filesize = offset;
+            break;
+        case SS_EOF:
+            status->status = (offset >= length);
+            break;
+        case SS_DevNm:
+            devname(status);
+            break;
+        default:
+            return (errorcode = E_UnkSvc);
+    }
+    return 0;
+}
+
+int fdwhole::setstatus(int opcode, statusbuf *status)
+{
+    switch(opcode)
+    {
+        case SS_Opt:
+        case SS_Lock:
+        case SS_Ticks:
+            return 0;
+        default:
+            return (errorcode = E_UnkSvc);
+    }
 }
 
 /*********************************************************************
@@ -710,13 +1217,23 @@ int fdterm::write(Byte *buf, int size)
 int fdterm::writeln(Byte *buf, int size)
 {
     int inx;
-    
+    /*
+     * OS9 lines end with a bare CR; it is the terminal driver that turns that
+     * into CR LF on the way to a screen. A file gets the CR alone -- so when
+     * our standard output is not a terminal, neither do we. Adding the newline
+     * regardless put a stray byte into every file produced by redirecting the
+     * emulator's own output, which the compiler passes read back as an error.
+     */
+    int istty = (os9cfg.eol == EOL_CRLF) ||
+                (os9cfg.eol == EOL_AUTO && fp && isatty(fileno(fp)));
+
     for(inx = 0; inx < size;)
     {
         fputc(((char*)buf)[inx],fp);
         if(((char*)buf)[inx++] == '\r')
         {
-            fputc('\n',fp);
+            if(istty)
+                fputc('\n',fp);
             break;
         }
     }
@@ -731,47 +1248,108 @@ int fdterm::seek(int offset)
     return 0;
 }
 
+/*
+ * How wide and tall the terminal is. A program that formats in columns -- dir,
+ * procs, mdir -- asks before it prints. Ask the real terminal if there is one,
+ * otherwise answer with the size OS-9 assumed.
+ */
+static void term_size(FILE *fp, int *cols, int *rows)
+{
+    struct winsize ws;
+
+    *cols = 80;
+    *rows = 24;
+    if(fp && ioctl(fileno(fp), TIOCGWINSZ, &ws) == 0) {
+        if(ws.ws_col) *cols = ws.ws_col;
+        if(ws.ws_row) *rows = ws.ws_row;
+    }
+}
+
 int fdterm::getstatus(int opcode, statusbuf *status)
 {
     switch (opcode)
     {
-        case 0:
+        case SS_Opt:
             memset(status,'\0',sizeof(*status));
-            status->filler[0x00] = 0x00;
+            status->filler[0x00] = 0x00;   /* SCF */
             status->filler[0x08] = 24; /* Lines per page */
             status->filler[0x09] = 8;  /* BS char */
             status->filler[0x0a] = 0x7f; /* DEL char */
             status->filler[0x0b] = 13; /* EOR char */
             status->filler[0x0c] = 4; /* EOF char ctrl-d */
+            {
+                int cols, rows;
+                term_size(fp, &cols, &rows);
+                status->filler[0x08] = rows;
+            }
             break;
-            
-        case 14: /* Return Device name (32-bytes at [X]) */
-            strcpy((char*) status->filler, driver->mntpoint);
+
+        case SS_Ready:  /* how many characters are waiting to be read */
+        {
+            struct pollfd pfd;
+            pfd.fd = fp ? fileno(fp) : -1;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            status->status = 0;
+            if(pfd.fd >= 0 && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                int n = 0;
+                // The count is what the caller gets back in B, so an honest
+                // number matters; fall back to "at least one" if we cannot ask.
+                if(ioctl(pfd.fd, FIONREAD, &n) != 0 || n <= 0)
+                    n = 1;
+                status->status = (n > 255) ? 255 : n;
+            }
+            if(status->status == 0)
+                return(errorcode = E_NotRdy);
+            break;
+        }
+
+        case SS_EOF:
+            status->status = 0;   /* a terminal is never at end of file */
+            break;
+
+        case SS_DevNm: /* Return Device name (32-bytes at [X]) */
+            devname(status);
+            break;
+
+        case SS_ScSiz: /* Screen size: X = columns, Y = rows */
+            term_size(fp, &status->cols, &status->rows);
             break;
 
         default:
-            fprintf(stderr,"Getstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
-    return(203);
+    return(0);
 }
 
 int fdterm::setstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
     {
-        case 2:
+        // Terminal settings we have no equivalent for. Accepting them is what
+        // a driver without the feature does; refusing makes shells and editors
+        // give up before they start.
+        case SS_Opt:     /* tmode(1) writing back the path options */
+        case SS_Size:
+        case SS_Reset:
+        case SS_Feed:
+        case SS_Frz:
+        case SS_SSig:    /* signal on data ready -- we never send it */
+        case SS_Relea:
+        case SS_Attr:
+        case SS_Break:
+        case SS_Cursr:
+        case SS_KySns:
+        case SS_ComSt:   /* baud and parity mean nothing to a pipe of bytes */
+        case SS_Open:
+        case SS_Close:
+        case SS_HngUp:
+        case SS_Ticks:
+        case SS_Lock:
             return 0;
-            break;
-            return 0;
-            break;
         default:
-            fprintf(stderr,"Setstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
-    return 203;
 }
 
 /*********************************************************************
@@ -886,31 +1464,47 @@ int fdpipe::getstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
     {
-        case 0:
+        case SS_Opt:
             memset(status,'\0',sizeof(*status));
-            status->filler[0x00] = 0x02;
+            status->filler[0x00] = 0x02;   /* PIPEMAN */
+            break;
+        case SS_Ready:
+        {
+            struct pollfd pfd;
+            pfd.fd = filedes[0];
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            status->status = 0;
+            if(pfd.fd >= 0 && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))
+                status->status = 1;
+            if(status->status == 0)
+                return(errorcode = E_NotRdy);
+            break;
+        }
+        case SS_EOF:
+            status->status = 0;
+            break;
+        case SS_DevNm:
+            devname(status);
             break;
         default:
-            fprintf(stderr,"Getstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
-    return(203);
+    return(0);
 }
 
 int fdpipe::setstatus(int opcode,statusbuf *status)
 {
     switch (opcode)
     {
-        case 2:
+        case SS_Opt:
+        case SS_Size:
+        case SS_SSig:
+        case SS_Relea:
+        case SS_Open:
+        case SS_Close:
             return 0;
-            break;
-            return 0;
-            break;
         default:
-            fprintf(stderr,"Setstat code %d not implemented\n",opcode);
-            exit(1);
-            break;
+            return(errorcode = E_UnkSvc);
     }
-    return 203;
 }
