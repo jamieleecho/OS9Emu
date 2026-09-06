@@ -46,6 +46,9 @@ enum {
     SS_Relea   = 0x1b,	// release the device from SS_SSig
     SS_Attr    = 0x1c,	// file attributes
     SS_Break   = 0x1d,
+    SS_FDInf   = 0x20,	// file descriptor sector of any file on the device,
+			// named by its number: Y = high byte of the number
+			// and a byte count, U = the low two bytes, X = buffer
     SS_DirEnt  = 0x21,
     SS_Cursr   = 0x25,
     SS_ScSiz   = 0x26,	// screen size: X = columns, Y = rows
@@ -66,7 +69,8 @@ typedef struct {
     size_t filesize;			// SS_Size, SS_Pos
     int status;				// SS_EOF, SS_Ready
     int cols, rows;			// SS_ScSiz
-    unsigned char filler[256];		// SS_Opt, SS_DevNm, SS_FD
+    unsigned long lsn;			// SS_FDInf, on the way in
+    unsigned char filler[256];		// SS_Opt, SS_DevNm, SS_FD, SS_FDInf
 } statusbuf;
 
 /*

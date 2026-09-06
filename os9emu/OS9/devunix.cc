@@ -308,6 +308,11 @@ static struct {
         names[size] = strdup(buf);
         return size++;
     }
+
+    // The host path a number stands for, or NULL if we never handed it out.
+    const char *getName(int fid) {
+        return (fid >= 0 && fid < size) ? names[fid] : NULL;
+    }
 } fileTable;
 
 /*
@@ -665,6 +670,56 @@ static void fill_fd_sector(statusbuf *status, const struct stat *st)
     }
 }
 
+/*
+ * How long a directory reads, in bytes: an entry for every host file, plus
+ * the ".." and "." that fdirunix::rescan puts in front of them. The host's
+ * own idea of a directory's size describes host records, not OS9 ones.
+ */
+static long dir_listing_size(const char *hostpath)
+{
+    DIR *dir;
+    struct dirent *entry;
+    long slots = 2;
+
+    if((dir = opendir(hostpath)) == NULL)
+        return 0;
+    while((entry = readdir(dir)) != NULL)
+        if(strcmp(".", entry->d_name) != 0 && strcmp("..", entry->d_name) != 0)
+            slots++;
+    closedir(dir);
+    return slots * (long)sizeof(os9dentry);
+}
+
+/*
+ * SS_FDInf: the descriptor of any file on this device, named by the number
+ * its directory entry carries rather than by a path. `dir -e` asks for one
+ * per entry -- it has the numbers already and opening every file to ask
+ * SS_FD would cost a path apiece -- and takes an error as fatal, so without
+ * this the whole listing ended at the first line with E$UnkSvc.
+ *
+ * Our numbers are indices into the table that hands them out, so this is a
+ * lookup back to the host path and a stat of it. A number we never issued is
+ * a sector that is not a descriptor, which is E$Sect on a real disk.
+ */
+static int fd_info(unsigned long lsn, statusbuf *status)
+{
+    struct stat st;
+    const char *host = fileTable.getName((int)lsn);
+
+    if(host == NULL || stat(host, &st) == -1)
+        return E_Sect;
+    fill_fd_sector(status, &st);
+    if(S_ISDIR(st.st_mode))
+    {
+        long size = dir_listing_size(host);
+        status->filler[0x09] = (size >> 24) & 0xff;
+        status->filler[0x0a] = (size >> 16) & 0xff;
+        status->filler[0x0b] = (size >> 8) & 0xff;
+        status->filler[0x0c] = size & 0xff;
+    }
+    return 0;
+}
+
 int fdunix::getstatus(int opcode,statusbuf *status)
 {
     struct stat statbuf;
@@ -728,6 +783,13 @@ int fdunix::getstatus(int opcode,statusbuf *status)
                 return(errorcode = E_BMode);
             fill_fd_sector(status, &statbuf);
             break;
+        case SS_FDInf: /* Somebody else's file descriptor sector */
+        {
+            int err = fd_info(status->lsn, status);
+            if(err)
+                return(errorcode = err);
+            break;
+        }
 
         default:
             return(errorcode = E_UnkSvc);
@@ -1183,6 +1245,13 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
             status->filler[0x0b] = (length >> 8) & 0xff;
             status->filler[0x0c] = length & 0xff;
             break;
+        case SS_FDInf: /* The descriptor of a file this directory lists */
+        {
+            int err = fd_info(status->lsn, status);
+            if(err)
+                return(errorcode = err);
+            break;
+        }
         default:
             return(errorcode = E_UnkSvc);
     }

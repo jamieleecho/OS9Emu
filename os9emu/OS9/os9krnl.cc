@@ -999,6 +999,12 @@ void os9::i_getstt()
     }
 
     memset(&statbuf, 0, sizeof(statbuf));
+    if(b == SS_FDInf)
+    {
+        // Which descriptor is wanted: the top byte of the number in Y's MSB,
+        // the other two in U. Y's LSB is how much of it the caller wants.
+        statbuf.lsn = ((unsigned long)(y >> 8) << 16) | u;
+    }
     paths[a]->errorcode = 0;
     paths[a]->getstatus((int)b,&statbuf);
     if(paths[a]->errorcode)
@@ -1016,6 +1022,13 @@ void os9::i_getstt()
         case SS_FD:
             // Y says how much of the descriptor the caller wants.
             for(inx = 0; inx < y && inx < (int)sizeof(statbuf.filler); inx++)
+                memory[(Word)(x + inx)] = statbuf.filler[inx];
+            break;
+        case SS_FDInf:
+            // Here only the low byte of Y is the count; the high byte was
+            // part of the sector number on the way in.
+            for(inx = 0; inx < (y & 0xff) &&
+                         inx < (int)sizeof(statbuf.filler); inx++)
                 memory[(Word)(x + inx)] = statbuf.filler[inx];
             break;
         case SS_Size:

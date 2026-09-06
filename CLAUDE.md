@@ -120,6 +120,28 @@ The symptom is a listing that is simply missing files, which looks exactly
 like a directory bug and is not. `--cols N` reports a width of your choosing —
 still capped — so the layout can be tested without a terminal.
 
+### dir -e asks for a descriptor by its number
+
+`dir -e` does not open a file to describe it. It has the sector number out of
+the directory entry already, and asks the *directory's* path for the file
+descriptor that number names — `SS_FDInf`. Our sector numbers are indices
+into the table that hands them out, so answering means looking the number back
+up as a host path and stating it.
+
+The register convention is not the one `../nitros9/level1/modules/rbf.asm`
+writes at the head of its own `Gst627`: the comment there has Y's halves the
+wrong way round. The code, and `dir`, put the top byte of the sector number in
+Y's MSB and the byte count in its LSB, with the other two bytes of the number
+in U.
+
+The listing ends at the first line without it. `dir` takes a failed
+`SS_FDInf` as fatal and exits carrying the error, so E$UnkSvc came out as a
+header, no files and error 208.
+
+A directory's `FD.SIZ` has to be the length of the listing we would serve —
+entries times 32 — for the same reason `SS_FD` does: the host's idea of a
+directory's size is about host records.
+
 ### fork() and stdio
 
 `F$Fork` is a real `fork()`; the whole machine is copied and the child loads
