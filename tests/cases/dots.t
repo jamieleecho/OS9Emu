@@ -27,5 +27,8 @@ echo "--- a dot is otherwise just a character"
 $OS9 list SUB/DEEP/there.txt
 
 echo "--- pwd walks the entries back up"
+# shellplus writes the first half of its banner to standard output and
+# without a line ending, so it lands in front of the first pwd. Cut it away.
 printf 'chd SUB/DEEP\npwd\nchd ..\npwd\nchd ..\npwd\nchd ..\npwd\n' \
-  | $OS9 shell 2>/dev/null | tr '\r' '\n' | grep '^/'
+  | $OS9 shell 2>/dev/null | tr '\r' '\n' \
+  | sed -e 's/^Shell+ v[0-9.]*[a-z]* //' | grep '^/'
