@@ -1,0 +1,14 @@
+--- the shell, and the command it forked to ask
+
+
+Usr #  id pty  state   mem primary module
+----- --- --- -------- --- --------------
+--- how much of the memory the modules live in is left
+
+
+ Address  pages
+--------- -----
+    -27FF   40
+
+Total pages free =  40
+Graphics Memory Not Allocated
