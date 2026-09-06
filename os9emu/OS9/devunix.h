@@ -94,8 +94,9 @@ public:
     int seek(int);
     int getstatus (int, statusbuf *);
 
-    // Bring the entry array back in step with the host directory
-    void rescan();
+    // Bring the entry array back in step with the host directory. Zero if we
+    // could not look, in which case the entries are left as they were.
+    int rescan();
 
     // Read an entry's name back out of OS9 form
     static void entryname(const os9dentry *, char *, size_t);

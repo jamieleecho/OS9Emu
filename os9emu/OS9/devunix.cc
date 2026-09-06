@@ -364,7 +364,16 @@ fdes *devunix::open(const char *path,int mode,int create)
         // Remembered so the listing can be brought back in step with the host,
         // and so a rewritten entry can be turned into a host rename.
         snprintf(fdir->hostdir, sizeof(fdir->hostdir), "%s", buf);
-        fdir->rescan();
+        if (!fdir->rescan()) {
+            // A directory we cannot read is an error, the same as a file we
+            // cannot open. Serving it as an empty one would have a caller
+            // conclude there is nothing in it.
+            delete fdir;
+            if (fp != NULL)
+                fclose(fp);
+            errorcode = (errno == EACCES) ? E_FNA : E_PNNF;
+            return 0;
+        }
         fd = fdir;
     } else {
         if (fp == NULL) {
@@ -733,10 +742,12 @@ fdirunix::fdirunix()
 /*
  * Has the host directory moved since we last read it?
  *
- * A directory last written in the second we started our own scan in counts as
- * moved whatever its timestamp says: a host filesystem that keeps mtime only
- * to the second cannot tell a change made while we were looking from one made
- * before, so within that second we look again.
+ * A stat that differs settles it. A stat that matches only proves nothing
+ * happened if the host times its writes finer than a second -- otherwise a
+ * change made in second N, after we looked in second N, leaves the timestamp
+ * exactly as we recorded it. So an answer with no nanoseconds in it is not
+ * taken as proof, and one that has them is still only trusted once the second
+ * our scan began in has passed.
  */
 int fdirunix::stale(const struct stat *st)
 {
@@ -745,6 +756,8 @@ int fdirunix::stale(const struct stat *st)
     if(st->st_dev != dirstat.st_dev || st->st_ino != dirstat.st_ino ||
        st->st_size != dirstat.st_size || st->st_mtime != dirstat.st_mtime ||
        ST_MTIM_NSEC(*st) != ST_MTIM_NSEC(dirstat))
+        return 1;
+    if(ST_MTIM_NSEC(*st) == 0)
         return 1;
     return st->st_mtime >= scantime;
 }
@@ -769,6 +782,26 @@ void fdirunix::reserve(int entries)
 }
 
 /*
+ * Is this slot the host file of that name?
+ *
+ * Asked by encoding the host name the way an entry stores it and comparing
+ * the two, rather than by decoding the entry: a name of 29 characters or more
+ * -- or one with a byte of its own above 0x7f, which UTF-8 is full of -- does
+ * not survive the trip back, and an entry that fails to recognise itself is
+ * taken for deleted and re-appended somewhere else, which is exactly what the
+ * slots are not allowed to do.
+ */
+static int sameentry(const os9dentry *e, const char *hostname)
+{
+    os9dentry probe;
+
+    if(hostname[0] == '\0')
+        return 0;
+    probe.set(hostname, 0);
+    return memcmp(e->name, probe.name, sizeof(e->name)) == 0;
+}
+
+/*
  * Read the host directory into the entry array, keeping the slots we have.
  *
  * RBF serves a directory out of its sectors as the caller asks for them, so a
@@ -786,7 +819,7 @@ void fdirunix::reserve(int entries)
  * back in step by name rather than rebuilding it, and an entry that is still
  * there stays where it was.
  */
-void fdirunix::rescan()
+int fdirunix::rescan()
 {
     struct stat st;
     DIR *dir;
@@ -794,14 +827,17 @@ void fdirunix::rescan()
     time_t began = time(NULL);
     int i, j;
 
+    // Gone or unreadable: serve what we have, and say we could not look. The
+    // first scan has nothing to fall back on, so open() turns this into the
+    // error the caller would have got before it had a path at all.
     if(hostdir[0] == '\0')
-        return;
+        return 0;
     if(stat(hostdir, &st) == -1)
-        return;			// gone or unreadable: serve what we have
+        return 0;
     if(!stale(&st))
-        return;
+        return 1;
     if((dir = opendir(hostdir)) == NULL)
-        return;
+        return 0;
 
     /*
      * What the host has, less "." and ".." -- those are ours to place, and
@@ -835,13 +871,11 @@ void fdirunix::rescan()
     // An entry the host still has keeps its slot; the rest are freed.
     for(i = 2; i < slots; i++)
     {
-        char name[64];
         int found = -1;
 
-        entryname(&dentries[i], name, sizeof(name));
-        if(name[0] != '\0')
+        if(dentries[i].name[0] != '\0')
             for(j = 0; j < nnames; j++)
-                if(names[j] != NULL && strcmp(names[j], name) == 0)
+                if(names[j] != NULL && sameentry(&dentries[i], names[j]))
                 {
                     found = j;
                     break;
@@ -881,6 +915,7 @@ void fdirunix::rescan()
     dirstat = st;
     scantime = began;
     havestat = 1;
+    return 1;
 }
 
 
