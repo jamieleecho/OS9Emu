@@ -26,4 +26,4 @@ echo "--- the same one, named as a path"     ; $OS9 ./here path
 # relative name and gets the execution directory pasted in front of it.
 echo "--- absolute, from the shell"
 printf '/dd/BIN/myecho fromshell\n' | $OS9 shell 2>/dev/null | tr '\r' '\n' \
-  | grep fromshell
+  | sed -e 's/^Shell+ v[0-9.]*[a-z]* //' | grep fromshell

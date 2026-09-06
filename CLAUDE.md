@@ -202,9 +202,26 @@ whole machine killed programs that would have carried on. The same goes for
 status codes: `dir` asks every device for its screen width and keeps its
 default when the answer is an error.
 
-`F$NMLink`/`F$NMLoad` ($21/$22) are the CoCo 3 "non-mapping" calls. With one
-address space they mean what the ordinary calls mean, and both `cc1` and the
-shell reach for them by preference.
+### The non-mapping calls report a size, not an address
+
+`F$NMLink`/`F$NMLoad` ($21/$22) are the CoCo 3 "non-mapping" pair, and both
+`cc1` and the shell reach for them by preference. With one address space the
+*work* is what the ordinary calls do. What they report is not.
+
+`F$Link` says where the module is: U the header, Y the execution entry point.
+`F$NMLink` says what it **needs** — Y comes back as `M$Mem` — and leaves U
+alone. Its caller has no way to read the header for itself, because under
+Level 2 the module is not in its address space, so the kernel reads it out on
+the way past (`FNMLink` in `../nitros9/level2/modules/ioman.asm`).
+
+The shell turns on exactly that. Its Level 1 build does `ldy M$Mem,y` after
+linking; its Level 2 build leaves the line out and hands what came back
+straight to `F$Fork` as a page count. Answering with an address therefore
+asked `F$Fork` for **255 pages** for every command the Level 2 shell ran — the
+whole address space, with nothing above the data area for `F$Mem` to add,
+which is the ground the C runtime's `sbrk` allocates out of. The C compiler
+died in `c.prep` with "grab overlap", which looks like a memory-layout bug and
+is a register convention.
 
 ### The module directory is per process
 
@@ -214,9 +231,14 @@ without loading it left the caller reading whatever sat at address 0 -- its
 own image -- and `runb` concluded that every packed procedure it was handed
 had a compiler error in it.
 
-`F$UnLink` gives the space back. Without that a shell that loads command after
-command runs the module area down into the program's data, and the C compiler
-dies partway through with "process memory full".
+`F$UnLink` gives the space back, and so must `F$UnLoad` ($1D), which is the
+same thing named by module rather than by address — `A` the type, `X` the
+name, `X` handed back past it. The Level 1 shell releases a command with
+`F$Link` and two `F$UnLink`s and the Level 2 shell with one `F$UnLoad`, so
+treating $1D as a no-op cost nothing at Level 1 and everything at Level 2:
+the module area grew by one command for every command run, until it came down
+to meet the shell's own data and the C compiler stopped three passes in with
+"process memory full".
 
 The directory belongs to the process that built it, though. Each OS-9 process
 here is a host process with its own copy of memory, so a module `load`ed by
@@ -229,7 +251,9 @@ not lend itself to. See issue #1.
 
 OS-9 zeroes it. Our memory is one array reused by every program, and after a
 fork it still holds the parent's variables — the shell read an uninitialised
-`modstk` through it and asked `F$Fork` for 255 pages that nothing needed.
+`modstk` through it and asked `F$Fork` for 255 pages that nothing needed. (The
+Level 2 shell asked for 255 for a different reason entirely; see "the
+non-mapping calls report a size, not an address".)
 
 ### X after a name
 
@@ -416,30 +440,25 @@ the *first* module of one — it reads a header, takes `M$Size` from it and
 stops — so the other eight never reach the module directory, and the directory
 is per-process anyway (#1). Real `F$Load` loads every module in the file.
 
-**The Level 2 `shell_21` asks for the whole address space.** What is left
-after the shell reads is `cc`, `dirlive` and `dirslots`, which die in `c.prep`
-with **grab overlap**. The trace says why:
+With the non-mapping calls reporting `M$Mem` and `F$UnLoad` releasing what it
+is given, the Level 2 shell forks exactly the page counts the Level 1 shell
+does, and the C compiler runs on a Level 2 root. `make test-l2` is 18 of 19.
 
-```
-'os9::f_fork: 255 pages requested       <- Level 2 shell_21
-'os9::f_fork: 2 pages requested         <- Level 1 shell_21
-```
+The one case left is `dots`, and it is a real gap rather than a Level 2 one.
+shellplus builds the directory in its prompt by walking up with a **run of
+dots** — it carries a forty-character string of them and points further back
+into it for each level (`L1732` in `../nitros9/level1/cmds/shellplus.asm`) —
+so the grandparent is `...` and not `../..`. We treat a run of three or more
+dots as a name, which is what the OS-9 pathlist rules say it is not: `.` is
+this directory and each dot after the first goes up one more level. RBF counts
+them and rewrites (`GtDvcNam` in `../nitros9/level1/modules/rbf.asm`). One
+level of prompt works and two do not, which is why the case fails only after
+a `chd` two deep.
 
-Level 2 gives every process its own 64K map and allocates only the blocks it
-touches, so its shell asks for all of it and means nothing by it. We take the
-request literally, `uppermem` lands at `MEMTOP`, and there is nothing left for
-`F$Mem` to add — which is exactly the ground the C runtime's `sbrk` allocates
-out of. See "memory layout is not a detail" above; this is that same bargain,
-broken from the other side. Dropping the Level 1 shell into the Level 2 root
-passes `cc` unchanged, so nothing else in the root is implicated. A process
-whose data area is asked to fill the address space needs headroom reserved
-above it regardless, or `F$Mem` has no answer to give.
-
-`dots`, `progpath` and `shell` fail on a Level 2 root for a duller reason:
-they are golden files of what Level 1's shell prints. shellplus writes the
-first half of its banner to standard *output*, so it lands in front of
-whatever the first command printed, and prompts `{term|01}/dd:` where
-`shell_21` prompts `OS9:`. The shell does the same work either way.
+`tests/cases/shell.t`, `dots.t` and `progpath.t` fold the shell's identity
+away, so the same golden files serve either root: shellplus writes the first
+half of its banner to standard *output* and prompts `{term|01}/dd:` where
+`shell_21` prompts `OS9:`, and the case is about what the shell does.
 
 ### What to leave alone
 
@@ -461,5 +480,7 @@ serve. They are also the least interesting commands in the set.
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
   `tsmon`, `edit` — sit waiting for input the test harness never sends.
-- A data area asked to fill the address space leaves `F$Mem` nothing to grow,
-  so the Level 2 shell cannot fork the C compiler — see "Level 2" above.
+- A run of three or more dots is a pathlist component that goes up that many
+  levels less one, and we read it as a name. The Level 2 shell builds the
+  directory in its prompt that way, so its prompt stops working two levels
+  down — see "Level 2" above.

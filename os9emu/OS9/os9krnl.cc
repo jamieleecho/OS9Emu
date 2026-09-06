@@ -602,6 +602,23 @@ void os9::f_sleep()
  * When the last link goes, so does the module -- which is what gives its
  * memory back.
  */
+/*
+ * One fewer user of a module, and the space back if that was the last.
+ */
+void os9::release_module(int slot)
+{
+    if(--moddir[slot].links > 0)
+        return;
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::released %s at %04x\n",
+                moddir[slot].name,moddir[slot].addr);
+    memmove(&moddir[slot], &moddir[slot+1],
+            (size_t)(mod_end - slot - 1) * sizeof(moddir[0]));
+    mod_end--;
+    reclaim_modules();
+}
+
 void os9::f_unlk()
 {
     int i;
@@ -610,19 +627,53 @@ void os9::f_unlk()
     {
         if(moddir[i].addr != u)
             continue;
-        if(--moddir[i].links > 0)
-            return;
-
-        if(debug_syscall)
-            fprintf(stderr,"'os9::f_unlk: %s at %04x\n",moddir[i].name,u);
-        memmove(&moddir[i], &moddir[i+1],
-                (size_t)(mod_end - i - 1) * sizeof(moddir[0]));
-        mod_end--;
-        reclaim_modules();
+        release_module(i);
         return;
     }
     // Unlinking something we never linked is not worth an error: the caller
     // is only saying it has finished with it.
+}
+
+/*
+ * F$UnLoad: A is the module type and X names the module. It is F$UnLink by
+ * name rather than by address, and it is what the Level 2 shell uses where
+ * the Level 1 shell uses F$Link followed by two F$UnLinks.
+ *
+ * Doing nothing here -- which is what we used to do -- left the module area
+ * growing by one command for every command the shell ran, until it came down
+ * to meet the shell's own data. The C compiler got three passes in and then
+ * stopped with "process memory full".
+ */
+void os9::f_unload()
+{
+    char name[64];
+    Word i, n, entry = x;
+    int slot;
+
+    f_prsnam();
+    if(cc.bit.c)
+        return;
+
+    n = b;
+    for(i = 0; i < n && i + 1 < sizeof(name); i++)
+        name[i] = memory[(Word)(x + i)] & 0x7f;
+    name[i] = '\0';
+
+    slot = findmodule(name);
+    if(slot < 0)
+    {
+        x = entry;
+        sys_error(E_MNF);
+        return;
+    }
+
+    // F$FModul leaves the caller's X past the name it consumed, and F$UnLoad
+    // hands that back -- unlike F$Link, which does not. See "X after a name".
+    x += n;
+
+    if(debug_syscall)
+        fprintf(stderr,"'os9::f_unload: %s\n",name);
+    release_module(slot);
 }
 
 /*
@@ -867,6 +918,40 @@ void os9::reclaim_modules()
 }
 
 /*
+ * What a link or a load reports about the module it found.
+ *
+ * The ordinary calls say where it is: U the module header, Y the execution
+ * entry point. The CoCo 3 "non-mapping" pair say what it *needs* instead --
+ * Y comes back as M$Mem, the module's memory requirement, and U is left
+ * alone. A Level 2 caller cannot read the header for itself, since the module
+ * is not in its address space, so the kernel reads it out on the way past
+ * (FNMLink in ../nitros9/level2/modules/ioman.asm).
+ *
+ * The shell turns on the difference. Its Level 2 build leaves out the
+ * "ldy M$Mem,y" its Level 1 build does, and hands what came back straight to
+ * F$Fork as a page count -- so answering with an address, which is what we
+ * used to do, asks F$Fork for the whole address space. Every command the
+ * Level 2 shell ran got a data area with nothing above it for F$Mem to add,
+ * which is the ground the C runtime's sbrk allocates out of, and the C
+ * compiler died in c.prep with "grab overlap".
+ */
+void os9::modregs(Word base, int nonmapping)
+{
+    a = memory[(Word)(base + 6)];		// M$Type
+    b = memory[(Word)(base + 7)];		// M$Revs
+
+    if(nonmapping)
+        y = (Word)((memory[(Word)(base + 0x0b)] << 8) |
+                    memory[(Word)(base + 0x0c)]);	// M$Mem
+    else
+    {
+        u = base;
+        y = (Word)(base + ((memory[(Word)(base + 9)] << 8) |
+                            memory[(Word)(base + 10)]));	// M$Exec
+    }
+}
+
+/*
  * F$Link and F$NMLink: find a module that is already in memory.
  *
  * Entry: X = the module name
@@ -877,7 +962,7 @@ void os9::reclaim_modules()
  * resident when a program starts. That is why the shell's first link of a
  * command fails and it forks the command instead.
  */
-void os9::f_link()
+void os9::f_link(int nonmapping)
 {
     char name[64];
     Word i, n, entry = x;
@@ -913,18 +998,14 @@ void os9::f_link()
     }
 
     moddir[slot].links++;
-    {
-        Word base = moddir[slot].addr;
-        u = base;
-        y = base + ((memory[(Word)(base + 9)] << 8) | memory[(Word)(base + 10)]);
-        a = memory[(Word)(base + 6)];
-        b = memory[(Word)(base + 7)];
-    }
+    modregs(moddir[slot].addr, nonmapping);
+
     if(debug_syscall)
-        fprintf(stderr,"'os9::f_link: %s at %04x\n",name,u);
+        fprintf(stderr,"'os9::f_link%s: %s at %04x\n",
+                nonmapping ? " (nm)" : "",name,moddir[slot].addr);
 }
 
-void os9::f_load()
+void os9::f_load(int nonmapping)
 {
     Byte upath[512];
     unsigned char modhead[14];
@@ -997,13 +1078,11 @@ void os9::f_load()
         mod_end++;
     }
 
-    a = memory[(Word)(base + 6)];
-    b = memory[(Word)(base + 7)];
-    u = base;
-    y = base + ((memory[(Word)(base + 9)] << 8) | memory[(Word)(base + 10)]);
+    modregs(base, nonmapping);
+
     if(debug_syscall)
-        fprintf(stderr,"'os9::f_load: %s type=%02X at %04x size %d\n",
-                (char*)upath,a,base,modsize);
+        fprintf(stderr,"'os9::f_load%s: %s type=%02X at %04x size %d\n",
+                nonmapping ? " (nm)" : "",(char*)upath,a,base,modsize);
 }
 
 /*
@@ -1579,10 +1658,10 @@ void os9::swi2(void)
     switch(memory[pc++])
     {
         case 0x00:
-            f_link();
+            f_link(0);
             break;
         case 0x01:
-            f_load();
+            f_load(0);
             break;
         case 0x02:
             f_unlk();
@@ -1652,19 +1731,22 @@ void os9::swi2(void)
             break;
         case 0x1c:		// F$SUser -- everything here runs as the super user
             break;
-        case 0x1d:		// F$UnLoad -- see F$UnLink
+        case 0x1d:		// F$UnLoad
+            f_unload();
             break;
         case 0x1e:		// F$Alarm -- no clock to hang an alarm off
             break;
 
-        // The CoCo 3 "non-mapping" pair. With one address space they mean
-        // exactly what the ordinary calls mean, and cc1 and the shell reach
-        // for them by preference.
+        /*
+         * The CoCo 3 "non-mapping" pair, which cc1 and the shell reach for by
+         * preference. With one address space the work is the same as the
+         * ordinary calls do; what they report is not. See modregs().
+         */
         case 0x21:		// F$NMLink
-            f_link();
+            f_link(1);
             break;
         case 0x22:		// F$NMLoad
-            f_load();
+            f_load(1);
             break;
 
         case 0x80:		// I$Attach -- a device is attached the moment it
