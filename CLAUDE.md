@@ -603,6 +603,38 @@ away, so the same golden files serve either root: shellplus writes the first
 half of its banner to standard *output* and prompts `{term|01}/dd:` where
 `shell_21` prompts `OS9:`, and the case is about what the shell does.
 
+### What is actually missing, and what F$DatMod would cost
+
+Every OS-9 system call a module makes is a `10 3F xx`, so the command set can
+simply be asked which ones it uses. Across both roots, the calls that reach us
+and are not answered are:
+
+| | who calls it | what it wants |
+|---|---|---|
+| `F$SSvc`  | `printerr`, `c.link` | install a 6809 routine as a system call |
+| `F$SLink` | `syscall`            | link a module in the system address space |
+| `F$AllBit`| `format`             | a disk image to allocate in |
+| `F$Debug` | `calldbg`            | the kernel debugger |
+| `F$AllRAM`, `F$DelRAM`, `F$AlHRAM`, `F$SRqMem` | `grfdrv` | graphics memory |
+
+That is the whole list. `F$SSvc` is the only one with a plausible payoff:
+`printerr` links itself resident and installs its own `F$PErr`, so that error
+numbers come out of `/DD/SYS/ERRMSG` instead of the table we compile in.
+
+**`F$DatMod` is not on the list, because nothing calls it.** NitrOS-9's kernel
+does not have the call at all — `3rdparty/p2mods/datmod.asm` adds it through
+`F$SSvc` — and no module in either root is a data module: the only types
+present are Prgrm, Sbrtn and Systm.
+
+It would also be the expensive one. A data module has to be writable by
+everyone linked to it, so its pages have to be really shared, which means a
+`MAP_SHARED` window mapped into `memory` at a fixed address. Mapping is by
+host page, and that page is 16K on an Apple Silicon machine — so the smallest
+window that can exist takes **a quarter of the 64K address space** away from
+every process, permanently, and lowers the ceiling the module area grows down
+from. That is the cost the shared *directory* was designed to avoid, paid for
+a call with no caller.
+
 ### What to leave alone
 
 The ill-behaved end of Level 2 is a tidy set to ignore: `dmem`, `pmap`,
@@ -617,9 +649,12 @@ serve. They are also the least interesting commands in the set.
   carries `S$Kill` and `S$Wake` between processes. No other code travels: each
   OS-9 process here is a host process, and a host signal cannot bring the code
   with it.
+- `F$SSvc` would let `printerr` install its own `F$PErr` and read the error
+  text out of `/DD/SYS/ERRMSG`. It is the only unanswered call with a caller
+  worth having; see "what is actually missing".
 - `F$DatMod` wants a module whose contents are shared, which the shared
   directory deliberately does not give: what is shared is the fact of a
-  module, not its bytes.
+  module, not its bytes. Nothing in either root calls it.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
