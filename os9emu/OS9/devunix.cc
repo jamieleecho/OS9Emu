@@ -213,14 +213,21 @@ devunix::devunix(const char *mntpnt, const char *args) : devdrvr(mntpnt)
     unixdir = args;
 }
 
-typedef struct {
-    char name[1024];
-} FileEntry;
-
-struct {
-    FileEntry files[100];
+/*
+ * What stands in for OS9 sector numbers.
+ *
+ * A directory entry names the sector its file descriptor lives in, and that
+ * number is how callers tell entries apart -- the walk up to the root
+ * compares the number recorded for ".." against the entries of the parent.
+ * So every host path we hand out an entry for needs its own number, and the
+ * table grows to hold as many as the process asks about: it used to hold a
+ * hundred, and the root plus /dd/CMDS alone comes to more than that.
+ */
+static struct {
+    char **names;
     int size;
-    
+    int capacity;
+
     int getID(const char *buf, const char *path) {
         char buf2[1024];
         
@@ -229,23 +236,26 @@ struct {
         return getID(buf2);
     }
     
-    int getID(char *buf) {
+    int getID(const char *buf) {
         int fid;
         for (fid=0; fid<size; fid++) {
-            if (strcmp(buf, files[fid].name) == 0)
-                break;
+            if (strcmp(buf, names[fid]) == 0)
+                return fid;
         }
-        if (fid == size) {
-            // The table is what stands in for OS9 sector numbers. It is fixed
-            // in size, so past the end every further name shares the last slot
-            // rather than running off the array.
-            if (size >= (int)(sizeof(files)/sizeof(files[0])))
-                return size - 1;
-            snprintf(files[fid].name, sizeof(files[fid].name), "%s", buf);
-            size++;
+        // A sector number is 24 bits wide, so that is as many names as can be
+        // told apart at all. Nothing comes close to it in practice.
+        if (size >= 0xffffff)
+            return size - 1;
+        if (size == capacity) {
+            int grown = capacity ? capacity * 2 : 64;
+            char **files = new char *[grown];
+            memcpy(files, names, size * sizeof(*files));
+            delete [] names;
+            names = files;
+            capacity = grown;
         }
-
-        return fid;
+        names[size] = strdup(buf);
+        return size++;
     }
 } fileTable;
 
@@ -348,35 +358,13 @@ fdes *devunix::open(const char *path,int mode,int create)
 
     // Are we actually trying to open a directory?
     fdunix *fd;
-    DIR *dir = opendir(buf);
-    struct dirent *entry;
-    if (dir != NULL) {
-        int size = 16;
-        os9dentry *dentries = new os9dentry[size];
-        int numEntries = 0;
-        dentries[numEntries++].set(".", fileTable.getID(buf));
-        dentries[numEntries++].set("..", fileTable.getID(buf, ".."));
-        while((entry = readdir(dir)) != NULL) {
-            if (strcmp(".", entry->d_name) == 0) continue;
-            if (strcmp("..", entry->d_name) == 0) continue;
-            if (numEntries >= size) {
-                size = size * 2;
-                os9dentry *dentries2 = new os9dentry[size * 2];
-                memcpy(dentries2, dentries, numEntries * sizeof(os9dentry));
-                delete [] dentries;
-                dentries = dentries2;
-            }
-            dentries[numEntries++].set(entry->d_name,
-                                       fileTable.getID(buf, entry->d_name));
-        }
-        closedir(dir);
-        
-        // Set up the fdirunix entry
+    struct stat dirst;
+    if (stat(buf, &dirst) != -1 && S_ISDIR(dirst.st_mode)) {
         fdirunix *fdir = new fdirunix;
-        fdir->dentries = dentries;
-        fdir->length = numEntries * sizeof(os9dentry);
-        // Remembered so a rewritten entry can be turned into a host rename.
+        // Remembered so the listing can be brought back in step with the host,
+        // and so a rewritten entry can be turned into a host rename.
         snprintf(fdir->hostdir, sizeof(fdir->hostdir), "%s", buf);
+        fdir->rescan();
         fd = fdir;
     } else {
         if (fp == NULL) {
@@ -719,7 +707,180 @@ int fdunix::setstatus(int opcode,statusbuf *status)
 
 fdirunix::fdirunix()
 {
+    dentries = NULL;
+    capacity = 0;
     offset = 0;
+    length = 0;
+    hostdir[0] = '\0';
+    scantime = 0;
+    havestat = 0;
+    memset(&dirstat, '\0', sizeof(dirstat));
+}
+
+/*
+ * The nanoseconds of a stat's modification time. POSIX spells it st_mtim and
+ * macOS st_mtimespec; both #define st_mtime onto the seconds of their own, so
+ * the Apple case has to be asked about first.
+ */
+#if defined(__APPLE__)
+#define ST_MTIM_NSEC(st) ((long)(st).st_mtimespec.tv_nsec)
+#elif defined(st_mtime)
+#define ST_MTIM_NSEC(st) ((long)(st).st_mtim.tv_nsec)
+#else
+#define ST_MTIM_NSEC(st) 0L
+#endif
+
+/*
+ * Has the host directory moved since we last read it?
+ *
+ * A directory last written in the second we started our own scan in counts as
+ * moved whatever its timestamp says: a host filesystem that keeps mtime only
+ * to the second cannot tell a change made while we were looking from one made
+ * before, so within that second we look again.
+ */
+int fdirunix::stale(const struct stat *st)
+{
+    if(!havestat)
+        return 1;
+    if(st->st_dev != dirstat.st_dev || st->st_ino != dirstat.st_ino ||
+       st->st_size != dirstat.st_size || st->st_mtime != dirstat.st_mtime ||
+       ST_MTIM_NSEC(*st) != ST_MTIM_NSEC(dirstat))
+        return 1;
+    return st->st_mtime >= scantime;
+}
+
+// Make room for at least this many entries, with the new ones empty.
+void fdirunix::reserve(int entries)
+{
+    if(entries <= capacity)
+        return;
+
+    int grown = capacity ? capacity : 16;
+    while(grown < entries)
+        grown *= 2;
+
+    os9dentry *bigger = new os9dentry[grown];
+    memset(bigger, '\0', grown * sizeof(os9dentry));
+    if(dentries != NULL)
+        memcpy(bigger, dentries, capacity * sizeof(os9dentry));
+    delete [] dentries;
+    dentries = bigger;
+    capacity = grown;
+}
+
+/*
+ * Read the host directory into the entry array, keeping the slots we have.
+ *
+ * RBF serves a directory out of its sectors as the caller asks for them, so a
+ * listing follows the disk: a file created while the path is open turns up in
+ * it. Ours is an array, and it used to be filled in once when the path was
+ * opened and never again, which froze the listing for as long as anything
+ * held the directory -- new files were invisible and deleted ones were still
+ * there.
+ *
+ * What RBF does not do is move an entry. A slot belongs to its file until the
+ * file goes, a deleted entry leaves its slot with a zero first byte, and a new
+ * file takes the first slot going spare. That matters here beyond looking
+ * right: rename(1) reads an entry, then seeks back to where it was and writes
+ * the new name over it, and PD.DCP is that offset. So this brings the array
+ * back in step by name rather than rebuilding it, and an entry that is still
+ * there stays where it was.
+ */
+void fdirunix::rescan()
+{
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+    time_t began = time(NULL);
+    int i, j;
+
+    if(hostdir[0] == '\0')
+        return;
+    if(stat(hostdir, &st) == -1)
+        return;			// gone or unreadable: serve what we have
+    if(!stale(&st))
+        return;
+    if((dir = opendir(hostdir)) == NULL)
+        return;
+
+    /*
+     * What the host has, less "." and ".." -- those are ours to place, and
+     * OS9 wants them first.
+     */
+    int nnames = 0, namecap = 32;
+    char **names = new char *[namecap];
+    while((entry = readdir(dir)) != NULL)
+    {
+        if(strcmp(".", entry->d_name) == 0) continue;
+        if(strcmp("..", entry->d_name) == 0) continue;
+        if(nnames == namecap)
+        {
+            char **more = new char *[namecap * 2];
+            memcpy(more, names, nnames * sizeof(*more));
+            delete [] names;
+            names = more;
+            namecap *= 2;
+        }
+        names[nnames++] = strdup(entry->d_name);
+    }
+    closedir(dir);
+
+    int slots = length / (int)sizeof(os9dentry);
+    if(slots < 2)
+        slots = 2;
+    reserve(slots);
+    dentries[0].set(".", fileTable.getID(hostdir));
+    dentries[1].set("..", fileTable.getID(hostdir, ".."));
+
+    // An entry the host still has keeps its slot; the rest are freed.
+    for(i = 2; i < slots; i++)
+    {
+        char name[64];
+        int found = -1;
+
+        entryname(&dentries[i], name, sizeof(name));
+        if(name[0] != '\0')
+            for(j = 0; j < nnames; j++)
+                if(names[j] != NULL && strcmp(names[j], name) == 0)
+                {
+                    found = j;
+                    break;
+                }
+        if(found >= 0)
+        {
+            free(names[found]);
+            names[found] = NULL;		// placed
+        }
+        else
+            dentries[i].name[0] = '\0';		// how OS9 marks a dead entry
+    }
+
+    // Whatever the host has that we do not is new. First slot going spare.
+    int spare = 2;
+    for(j = 0; j < nnames; j++)
+    {
+        if(names[j] == NULL)
+            continue;
+        while(spare < slots && dentries[spare].name[0] != '\0')
+            spare++;
+        if(spare == slots)
+        {
+            reserve(slots + 1);
+            slots++;
+        }
+        dentries[spare].set(names[j], fileTable.getID(hostdir, names[j]));
+        free(names[j]);
+    }
+    delete [] names;
+
+    // Dead entries at the end are not worth serving.
+    while(slots > 2 && dentries[slots-1].name[0] == '\0')
+        slots--;
+
+    length = slots * (int)sizeof(os9dentry);
+    dirstat = st;
+    scantime = began;
+    havestat = 1;
 }
 
 
@@ -732,12 +893,18 @@ fdirunix::~fdirunix()
 int fdirunix::close()
 {
     if(usecount == 1)
+    {
         delete [] dentries;
+        dentries = NULL;
+        capacity = 0;
+        length = 0;
+    }
     return fdunix::close();
 }
 
 int fdirunix::read(Byte *buf, int size)
 {
+    rescan();
     if (offset >= length) {
         errorcode = E_EOF;
         return -1;
@@ -874,14 +1041,16 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
             }
             break;
         case SS_Size: /* Read/Write File Size */
+            rescan();
             status->filesize = length;
             break;
         case SS_Pos: /* Get File Current Position */
-            // A directory is served out of the entry array we built at open
-            // time, not out of fp, so the position is ours to report.
+            // A directory is served out of our own entry array, not out of
+            // fp, so the position is ours to report.
             status->filesize = offset;
             break;
         case SS_EOF: /* Test for End of File */
+            rescan();
             status->status = (offset >= length);
             break;
         case SS_DevNm: /* Return Device name (32-bytes at [X]) */
@@ -890,7 +1059,19 @@ int fdirunix::getstatus(int opcode,statusbuf *status)
         case SS_FD: /* Return the file descriptor sector */
             if(!fp || fstat(fileno(fp), &statbuf) == -1)
                 return(errorcode = E_BMode);
+            rescan();
             fill_fd_sector(status, &statbuf);
+            /*
+             * FD.SIZ has to be the length of the listing we serve, not what
+             * the host makes of a directory -- macOS happens to report 32
+             * bytes an entry, the same as an OS9 directory entry, and any
+             * other host would have a caller that sizes a directory this way
+             * reading a truncated or an over-long one.
+             */
+            status->filler[0x09] = (length >> 24) & 0xff;
+            status->filler[0x0a] = (length >> 16) & 0xff;
+            status->filler[0x0b] = (length >> 8) & 0xff;
+            status->filler[0x0c] = length & 0xff;
             break;
         default:
             return(errorcode = E_UnkSvc);
