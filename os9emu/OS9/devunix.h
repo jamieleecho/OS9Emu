@@ -24,6 +24,14 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/*
+ * Resolve "." and ".." out of a path, in place when dst == path. The first
+ * rootlen characters are kept verbatim and ".." never climbs above them --
+ * the mount point of a host path, the device name of an OS9 one.
+ */
+void canonicalizePath(char *dst, const char *path, size_t rootlen,
+                      size_t dstsize);
+
 class os9dentry {
 public:
     unsigned char name[28];
@@ -80,6 +88,7 @@ public:
     int offset;
     int length;			// entries we serve, in bytes
     char hostdir[1024];		// the host directory these entries came from
+    size_t hostroot;		// how much of it is the mount point
     struct stat dirstat;	// what it looked like when we last read it
     time_t scantime;		// and when that was, by the host clock
     int havestat;

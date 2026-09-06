@@ -1,0 +1,21 @@
+--- SUB
+DEEP
+--- SUB/.
+DEEP
+--- SUB/DEEP/..
+DEEP
+--- SUB/./DEEP
+there.txt
+--- .. of the root
+CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
+--- above the root
+CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
+--- a dot is otherwise just a character
+The quick brown fox
+jumps over the lazy dog
+third line here
+--- pwd walks the entries back up
+/h0/SUB/DEEP
+/h0/SUB
+/h0
+/h0

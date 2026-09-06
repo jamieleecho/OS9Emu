@@ -1293,6 +1293,14 @@ void os9::i_chgdir()
         return;
     }
 
+    /*
+     * Resolve the dots now, before the name is remembered. Storing "/h0/T1/.."
+     * as it stands left "chd .." sitting where it was and every later relative
+     * path built on a directory that grew a component each time.
+     */
+    canonicalizePath((char*)upath,(char*)upath,strlen(dev->mntpoint),
+                     sizeof(upath));
+
     dev->errorcode = 0;
     fd = dev->open((const char*)&upath[strlen(dev->mntpoint)], 0x80 | 1, 0);
     if(!fd)

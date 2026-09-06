@@ -146,59 +146,110 @@ static char *findpath(char *path, size_t rootlen, bool mustexist)
     return path;
 }
 
-/* Canonicalizes a filename. */
-void canonicalizePath(char *dst, char *path) {
-    int dotCount = 0, slashCount = 0;
-    int jj=0;
-    bool foundEnd = false;
-    int partSize = 0;
-    bool dotStarted = false;
-    for (int ii=0; !foundEnd; ii++) {
-        char c = path[ii];
-        foundEnd = (c == '\0');
-        
-        // Dots are special. Handle multiple dots here
-        if (c != '.' && (dotCount > 0)) {
-            // We encountered two dots, so remove the previous filename component
-            if ((dotCount <= 2) && dotStarted) {
-                jj--;
-                int slashesLeft = (dotCount == 2) ? 2 : 1;
-                for (; (jj>1) && (slashesLeft>0); jj--)
-                    if (dst[jj] == '/') slashesLeft--;
-                dst[++jj] = '\0';
-            } else {
-                // Simply append all the dots
-                while(dotCount-- > 0)
-                    dst[jj++] = '.';
-            }
-            dotCount = 0;
-        }
-        if (c == '.') {
-            if (partSize == 0) {
-                dotCount = 1;
-                dotStarted = true;
-            } else
-                dotCount++;
-            partSize++;
-        }
-        
-        // Slashes are special. Handle them here
-        if (c != '/' && (slashCount > 0)) {
-            dst[jj++] = '/';
-            slashCount = 0;
-            partSize = 0;
-        }
-        if (c == '/') slashCount++;
-        
-        // Add the last character
-        if ((c != '.') && (c != '/')) {
-            dst[jj++] = c;
-            partSize++;
-        }
+/*
+ * Resolve "." and ".." out of a path, in place when dst == path.
+ *
+ * A component of exactly "." goes away and ".." takes the component before it
+ * with it. Everything else is a name, dots and all: ".profile", "a.b" and
+ * "..." name files and are copied across untouched. Repeated slashes collapse
+ * and a trailing slash is dropped.
+ *
+ * The first rootlen characters are kept verbatim and ".." never climbs above
+ * them. For a host path that is the mount point -- so no amount of ".." walks
+ * out of the OS9 disk and into the rest of the filesystem -- and for an OS9
+ * path it is the device name. The root of an OS9 disk is its own parent,
+ * which is what OS9 itself does.
+ *
+ * The result is no longer than the path it came from, save for the separator
+ * this has to put in when rootlen does not end at one, so dstsize is here to
+ * bound that rather than because a real path ever needs it.
+ *
+ * Doing this by counting dots, as this used to, mistakes every one of those
+ * cases: "/dd/T1/.." came back as "/dd/T1", so "chd .." stayed where it was
+ * and "dir T1/.." listed T1; "/dd/./T1" was left with the dot still in it;
+ * and a name with a dot in it after any earlier hidden name lost a whole
+ * directory component.
+ */
+void canonicalizePath(char *dst, const char *path, size_t rootlen,
+                      size_t dstsize)
+{
+    size_t len = strlen(path);
+    size_t out, floor;
+    const char *p;
+    bool rooted;
+
+    if(dstsize == 0)
+        return;
+    if(rootlen > len)
+        rootlen = len;
+    if(rootlen > dstsize - 1)
+        rootlen = dstsize - 1;
+    if(dst != path)
+        memcpy(dst, path, rootlen);
+    out = floor = rootlen;
+    p = path + rootlen;
+    rooted = rootlen > 0;
+
+    // A leading slash is the root itself, not a separator
+    if(out == 0 && *p == '/')
+    {
+        dst[out++] = '/';
+        floor = out;
+        rooted = true;
+        while(*p == '/')
+            p++;
     }
-    
-    if ((jj >= 3) && (dst[jj-2] == '/'))
-        dst[jj-2] = '\0';
+
+    while(*p)
+    {
+        const char *seg = p;
+        size_t seglen;
+
+        while(*p && *p != '/')
+            p++;
+        seglen = (size_t)(p - seg);
+        while(*p == '/')
+            p++;
+
+        if(seglen == 0)			// a run of slashes, or a trailing one
+            continue;
+        if(seglen == 1 && seg[0] == '.')
+            continue;
+
+        if(seglen == 2 && seg[0] == '.' && seg[1] == '.')
+        {
+            if(out > floor)
+            {
+                // Back over the last component and the slash in front of it
+                while(out > floor && dst[out-1] != '/')
+                    out--;
+                if(out > floor)
+                    out--;
+                continue;
+            }
+            if(rooted)
+                continue;	// at the root: it is its own parent
+            // A relative path may genuinely start with "..", and what we keep
+            // here nothing later may back over.
+        }
+
+        if(out > 0 && dst[out-1] != '/')
+        {
+            if(out + 1 > dstsize - 1)
+                break;
+            dst[out++] = '/';
+        }
+        if(out + seglen > dstsize - 1)
+            break;
+        memmove(dst + out, seg, seglen);
+        out += seglen;
+        if(seglen == 2 && seg[0] == '.' && seg[1] == '.')
+            floor = out;
+    }
+
+    if(out == 0 && len > 0 && dstsize > 1)
+        dst[out++] = '.';	// everything cancelled out: that is here
+    dst[out] = '\0';
 }
 
 /*********************************************************************
@@ -228,11 +279,11 @@ static struct {
     int size;
     int capacity;
 
-    int getID(const char *buf, const char *path) {
+    int getID(const char *buf, const char *path, size_t rootlen) {
         char buf2[1024];
         
         snprintf(buf2, sizeof(buf2), "%s/%s", buf, path);
-        canonicalizePath(buf2, buf2);
+        canonicalizePath(buf2, buf2, rootlen, sizeof(buf2));
         return getID(buf2);
     }
     
@@ -264,8 +315,8 @@ static struct {
  *
  * OS9 reports this as PD.DCP in the path options, and rename(1) uses it to
  * seek straight to the entry and write a new name over it. The enumeration
- * has to match the one devunix::open builds for a directory path -- "." and
- * ".." first, then the directory's own order -- or the seek lands on the
+ * has to match the one fdirunix::rescan builds for a directory path -- ".."
+ * and "." first, then the directory's own order -- or the seek lands on the
  * wrong file.
  */
 static int direntry_offset(const char *hostpath)
@@ -274,7 +325,7 @@ static int direntry_offset(const char *hostpath)
     const char *base;
     DIR *dir;
     struct dirent *entry;
-    int index = 2;		// "." and ".." occupy the first two slots
+    int index = 2;		// ".." and "." occupy the first two slots
 
     base = strrchr(hostpath, '/');
     if(base == NULL)
@@ -326,7 +377,7 @@ fdes *devunix::open(const char *path,int mode,int create)
     }
 
     snprintf(buf, sizeof(buf), "%s%s", unixdir, path);
-    canonicalizePath(buf, buf);
+    canonicalizePath(buf, buf, strlen(unixdir), sizeof(buf));
 
     if (!findpath(buf,strlen(unixdir),!create))
     {
@@ -364,6 +415,9 @@ fdes *devunix::open(const char *path,int mode,int create)
         // Remembered so the listing can be brought back in step with the host,
         // and so a rewritten entry can be turned into a host rename.
         snprintf(fdir->hostdir, sizeof(fdir->hostdir), "%s", buf);
+        // ".." of the mount point is the mount point: an OS9 disk's root is
+        // its own parent, and pwd stops when it sees the two agree.
+        fdir->hostroot = strlen(unixdir);
         if (!fdir->rescan()) {
             // A directory we cannot read is an error, the same as a file we
             // cannot open. Serving it as an empty one would have a caller
@@ -414,6 +468,7 @@ int devunix::makdir(char *path,int mode)
     char buf[1024];
     
     snprintf(buf, sizeof(buf), "%s/%s", unixdir, path);
+    canonicalizePath(buf, buf, strlen(unixdir), sizeof(buf));
     if(mkdir(buf,o2u_attr(mode)) == -1)
         return(errorcode = 218);
     return 0;
@@ -427,8 +482,9 @@ int devunix::delfile(char *path)
     char buf[1024];
     
     snprintf(buf, sizeof(buf), "%s/%s", unixdir, path);
+    canonicalizePath(buf, buf, strlen(unixdir), sizeof(buf));
     if(unlink(buf) == -1)
-        return(errorcode = 218);
+        return(errorcode = 216);
     return 0;
 }
 
@@ -721,6 +777,7 @@ fdirunix::fdirunix()
     offset = 0;
     length = 0;
     hostdir[0] = '\0';
+    hostroot = 0;
     scantime = 0;
     havestat = 0;
     memset(&dirstat, '\0', sizeof(dirstat));
@@ -865,8 +922,16 @@ int fdirunix::rescan()
     if(slots < 2)
         slots = 2;
     reserve(slots);
-    dentries[0].set(".", fileTable.getID(hostdir));
-    dentries[1].set("..", fileTable.getID(hostdir, ".."));
+    /*
+     * ".." comes first and "." second -- that is the order RBF's MakDir
+     * writes them in, and pwd/pxd depend on it: they read the two entries,
+     * take them being equal to mean "this is the root", and otherwise walk up
+     * looking for the entry in the parent whose number matches the second
+     * one. With the two the other way round the walk searches for the
+     * parent's own number, finds nothing and reports a read error.
+     */
+    dentries[0].set("..", fileTable.getID(hostdir, "..", hostroot));
+    dentries[1].set(".", fileTable.getID(hostdir));
 
     // An entry the host still has keeps its slot; the rest are freed.
     for(i = 2; i < slots; i++)
@@ -902,7 +967,8 @@ int fdirunix::rescan()
             reserve(slots + 1);
             slots++;
         }
-        dentries[spare].set(names[j], fileTable.getID(hostdir, names[j]));
+        dentries[spare].set(names[j],
+                            fileTable.getID(hostdir, names[j], hostroot));
         free(names[j]);
     }
     delete [] names;
@@ -998,6 +1064,15 @@ int fdirunix::write(Byte *buf, int size)
             // We cannot grow a directory this way: entries appear when a file
             // is created, not when somebody writes past the end.
             errorcode = E_Full;
+            return written ? written : -1;
+        }
+
+        if(slot < 2)
+        {
+            // Slots 0 and 1 are ".." and ".", which we make up rather than
+            // read off a disk. Renaming or clearing one would ask the host to
+            // rename a directory out from under itself.
+            errorcode = E_FNA;
             return written ? written : -1;
         }
 
