@@ -62,7 +62,14 @@ fi
 # A terminal under OS-9 gets CR LF at the end of each line; a plain file gets a
 # bare CR. Fold both to a newline -- taking CR LF first, so it does not turn
 # into a blank line -- and drop trailing blanks so a diff shows real changes.
-normalise() { perl -pe 's/\r\n/\n/g; s/\r/\n/g' | sed -e 's/[[:space:]]*$//'; }
+# LC_ALL=C because a case's output is bytes, not text: a program that goes
+# wrong can put anything on its standard output, and BSD sed answers a byte
+# that is not valid in the locale with "RE error: illegal byte sequence" and
+# stops -- taking the whole rest of the case's output with it, so the diff
+# shows a wholesale loss where the truth is one bad line.
+normalise() {
+  perl -pe 's/\r\n/\n/g; s/\r/\n/g' | LC_ALL=C sed -e 's/[[:space:]]*$//'
+}
 
 pass=0; fail=0; failed=()
 
@@ -121,7 +128,7 @@ RUNNER
 
   if [ "$got" = "$(normalise < "$want_file")" ]; then
     echo "ok   $name"
-    [ "$verbose" = 1 ] && printf '%s\n' "$got" | sed 's/^/       /'
+    [ "$verbose" = 1 ] && printf '%s\n' "$got" | LC_ALL=C sed 's/^/       /'
     pass=$((pass+1))
   else
     echo "FAIL $name"
@@ -129,8 +136,8 @@ RUNNER
     # readable by a sandboxed diff.
     normalise < "$want_file" > "$WORK/.want"
     printf '%s\n' "$got"     > "$WORK/.got"
-    diff -u "$WORK/.want" "$WORK/.got" \
-      | sed -e '1,2d' -e 's/^/       /' | head -40
+    LC_ALL=C diff -u "$WORK/.want" "$WORK/.got" \
+      | LC_ALL=C sed -e '1,2d' -e 's/^/       /' | head -40
     fail=$((fail+1)); failed+=("$name")
   fi
   rm -rf "$WORK" "$WORK.bin"
