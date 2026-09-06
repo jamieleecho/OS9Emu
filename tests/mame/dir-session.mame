@@ -1,0 +1,15 @@
+# What a real NitrOS-9 Level 1 system shows for the commands os9emu is tested
+# on. Booting stops at a TIME prompt; an empty line gets past it, since none of
+# these comparisons turn on what the clock says.
+#
+# Waits are explicit seconds rather than "wait until settled": the CoCo blinks
+# its cursor, so the screen never settles.
+type
+wait 6
+snap prompt
+type dir
+wait 10
+snap dir
+type free
+wait 10
+snap free

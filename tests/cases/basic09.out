@@ -1,0 +1,21 @@
+Basic09
+Ready
+B:PROCEDURE demo
+*
+E:*
+E:*
+E:*
+E:*
+E:Ready
+B:PROCEDURE demo
+ 0000      PRINT "counting"
+ 000C      FOR i=1 TO 3
+ 001E        PRINT i,i*i
+ 002B      NEXT i
+Ready
+B:counting
+1.              1.
+2.              4.
+3.              9.
+Ready
+B:
