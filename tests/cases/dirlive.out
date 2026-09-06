@@ -1,0 +1,15 @@
+CC1 VERSION RS 01.00.00
+COPYRIGHT 1983 MICROWARE
+REPRODUCED UNDER LICENSE
+TO TANDY
+'dirlive.c'
+c.prep:
+c.pass1:
+c.pass2:
+c.opt:
+c.asm:
+c.link:
+--- run ---
+before create: no
+after create:  yes
+after delete:  no

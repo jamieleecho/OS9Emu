@@ -22,6 +22,7 @@
 // and with out leading slash.
 
 #include <string.h>
+#include <sys/stat.h>
 
 class os9dentry {
 public:
@@ -75,9 +76,13 @@ public:
 class fdirunix: public fdunix {
 public:
     os9dentry *dentries;
+    int capacity;		// entries the array has room for
     int offset;
-    int length;
+    int length;			// entries we serve, in bytes
     char hostdir[1024];		// the host directory these entries came from
+    struct stat dirstat;	// what it looked like when we last read it
+    time_t scantime;		// and when that was, by the host clock
+    int havestat;
 
     virtual ~fdirunix();
     fdirunix();
@@ -89,8 +94,16 @@ public:
     int seek(int);
     int getstatus (int, statusbuf *);
 
+    // Bring the entry array back in step with the host directory. Zero if we
+    // could not look, in which case the entries are left as they were.
+    int rescan();
+
     // Read an entry's name back out of OS9 form
     static void entryname(const os9dentry *, char *, size_t);
+
+private:
+    int stale(const struct stat *);
+    void reserve(int);
 };
 
 /*

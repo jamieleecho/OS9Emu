@@ -144,6 +144,22 @@ paths have to be writable, and a write that changes an entry's name becomes a
 host `rename()`. The path option offsets are in `../nitros9/defs/rbf.d`; ours
 were three bytes out.
 
+### A directory listing is live, and its slots do not move
+
+A directory path is served out of an array of entries built from `readdir`.
+That array used to be filled in when the path was opened and never again, so
+the listing was frozen: a program that opened a directory and kept reading it
+never saw a file created afterwards, and went on seeing one that had gone.
+`fdirunix::rescan` brings it back in step whenever the host directory's stat
+has moved.
+
+It brings it back *by name*, though, because RBF never moves an entry. A slot
+belongs to its file until the file goes, a deleted entry leaves its slot with
+a zero first byte, and a new file takes the first slot going spare. `rename`
+depends on exactly that — `PD.DCP` is a byte offset into the directory, read
+before the write and used after it — and so does anything that deletes files
+while walking a listing.
+
 ## Running things
 
 ```sh
