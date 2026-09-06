@@ -336,6 +336,38 @@ process that is asking. Ours are not — a forked `mdir` has loaded nothing —
 so on a Level 1 root it still prints a heading over nothing, and that is not
 something `F$GModDr` can fix.
 
+### A process id belongs to the machine
+
+The same argument as the module directory, one step on. An OS-9 process id
+has to mean the same thing to every process or `F$Send` cannot reach anybody
+and `procs` has nothing to list — and each OS-9 process here is a host
+process, so the table has to live in the shared page beside the directory.
+`F$ID` used to answer 1 for everybody.
+
+An id is a slot number, so it is small enough for the byte OS-9 keeps it in
+and is reused once the process holding it has gone. **Slot zero is never
+handed out**: id 1 is the system process on a real machine, and `procs` opens
+its scan with `inc <u0001` from 1, so the first id it ever asks about is 2.
+Numbering our first process 1 hid it from every listing.
+
+A row is given back at exit, and one whose process died without doing so —
+killed, or crashed — is dropped by the next process to walk the table, which
+asks the host with `kill(pid, 0)`. There is nobody here to notice a death but
+the next process to look.
+
+**`F$Wait` has to answer with the id `F$Fork` gave out**, and by the time it
+is asked the child has exited and its shared row is gone. So the mapping
+`F$Wait` answers from is the one the parent kept for itself, not the shared
+table. Getting this wrong is quiet and expensive: `shellplus` waits again for
+a child it has already been told about, the second wait finds no children at
+all, and every command after the first ends in "ERROR #226 - No Children".
+
+`F$GPrDsc` builds a 512-byte descriptor out of a row; `F$GBlkMp` hands over
+the block map the fake memory is kept in, one byte a block and zero meaning
+free. What `mfree` reports is therefore the room left for modules and for the
+programs processes are running, not the room left in anybody's 64K — those
+are separate things here in a way they are not on a real machine.
+
 `printerr` is not waiting on this call at all. It links itself an extra time
 to stay resident and then installs its own `F$PErr` into the system service
 table with `F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG` — a
@@ -516,11 +548,11 @@ This is what makes Level 2 the easier of the two to host.
 
 Under Level 2 those tables live in another address space, so the utilities
 cannot walk them and have to ask the kernel for a copy instead. We have no
-direct page worth reading, but we can answer a question — and `mdir` does now
-list what `load` left behind. `procs` and `mfree` still print a correct
-heading with nothing under it, because the calls they ask answer `E$UnkSvc`
-and the utilities carry on, which is what "unknown service calls must not be
-fatal" bought.
+direct page worth reading, but we can answer a question, and all three do
+their job now: `mdir` lists what `load` left behind, `procs` lists the
+processes with the program each is running, and `mfree` reports what is left
+of the memory the modules live in. Level 1's versions of the same three read
+the kernel's direct page and still print a heading over nothing.
 
 `level2/coco3/cmds` assembles most of its modules straight out of
 `level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
@@ -568,10 +600,11 @@ serve. They are also the least interesting commands in the set.
   carries `S$Kill` and `S$Wake` between processes. No other code travels: each
   OS-9 process here is a host process, and a host signal cannot bring the code
   with it.
-- `procs` and `mfree` want `F$GPrDsc` and `F$GBlkMp`, the same shape of call
-  as the `F$GModDr` that `mdir` now gets an answer to. `F$DatMod` wants a
-  module whose contents are shared, which the shared directory deliberately
-  does not give.
+- `F$DatMod` wants a module whose contents are shared, which the shared
+  directory deliberately does not give: what is shared is the fact of a
+  module, not its bytes.
+- `F$Load` loads only the first module of a file, so the eight that follow
+  `shellplus` in the Level 2 `CMDS/shell` never reach the directory.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,

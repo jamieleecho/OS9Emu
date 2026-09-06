@@ -1,0 +1,16 @@
+--- the shell, and the command it forked to ask
+
+
+         User                     Mem Stack
+Id  PId Number  Pty Age Sts Signl Siz  Ptr   Primary Module
+--- --- ------- --- --- --- ----- --- ----- ----------------
+  2   0   UID   128 128 $00    0   36 $3FF5 Shell
+  3   2   UID   128 128 $00    0   32 $23FF Procs
+--- how much of the memory the modules live in is left
+
+
+ Blk Begin   End   Blks  Size
+ --- ------ ------ ---- ------
+   4   8000  7FFFF   3C   480k
+                   ==== ======
+            Total:   3C   480k

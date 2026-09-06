@@ -18,6 +18,7 @@
  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #define DESMAX 16 // Whatever _NFILE is set to in os9's stdio.h
+#define PIDMAX 32 // OS9 process ids run 1..PIDMAX; see the shared process table
 
 #include "os9config.h"
 
@@ -49,8 +50,11 @@ private:
     modent moddir[32];
     int mod_end;
     int modtop;
-    pid_t pids[32]; // Mapping of Proces identifiers
-    int pid_end;
+    // Which host process an OS9 process id belongs to, as this process knows
+    // it. The machine-wide answer is in the shared process table; this is the
+    // one that survives the child's own row being given back at exit, which
+    // is what F$Wait needs after the child has gone.
+    pid_t pids[PIDMAX + 1];
 
     /*
      * Signals. F$Icpt names a routine to vector to when one arrives, and
@@ -82,6 +86,8 @@ private:
     void f_cmpnam();
     void f_cpymem();
     void f_gmoddr();
+    void f_gprdsc();
+    void f_gblkmp();
     int  module_bytes(const char *path, long off, Byte *dst, int count);
     void f_crc();
     void f_fork();

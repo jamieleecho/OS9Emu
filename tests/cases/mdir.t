@@ -11,6 +11,10 @@
 # would have to be resident in the asking process for it to find any -- so
 # there the same commands print a heading over nothing, which is NAME.out.
 #
+# The block column is a real address in the fake memory the directory is
+# expressed in, so it counts from whatever is already resident -- the shell's
+# own program holds the first blocks going.
+#
 # The banner carries the clock and its first half goes to standard output, so
 # it lands in front of the first command's output; the header carries the
 # clock too. Cut both away. The prompt goes to standard error, which the pipe
