@@ -1,0 +1,22 @@
+--- ident ---
+    5 $11 $F5FF9A . Echo
+--- attr ---
+
+You do not own that file.
+--- cmp same ---
+
+ Differences
+
+   None ...
+Bytes compared:   0000003C
+Bytes different:  00000000
+--- dump ---
+
+Address   0 1  2 3  4 5  6 7  8 9  A B  C D  E F  0 2 4 6 8 A C E
+-------- ---- ---- ---- ---- ---- ---- ---- ----  ----------------
+00000000 6F6E 650D 7477 6F0D                      one.two.
+--- tmode ---
+/term
+ upc=00 bso=00 dlo=00 eko=00 alf=00 nul=00 pau=00 pag=18
+ bsp=08 del=7F eor=0D eof=04 rpr=00 dup=00 psc=00 int=00
+ qut=00 bse=00 ovf=00 par=00 bau=00 xon=00 xof=00

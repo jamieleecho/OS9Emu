@@ -57,14 +57,6 @@
             argument = "echo"
             isEnabled = "YES">
          </CommandLineArgument>
-         <CommandLineArgument
-            argument = "hello"
-            isEnabled = "YES">
-         </CommandLineArgument>
-         <CommandLineArgument
-            argument = "world"
-            isEnabled = "YES">
-         </CommandLineArgument>
       </CommandLineArguments>
    </LaunchAction>
    <ProfileAction

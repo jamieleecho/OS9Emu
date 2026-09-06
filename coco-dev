@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Run a command inside the coco-dev toolchain image (lwasm, lwtools, ToolShed,
+# cmoc, mame).
+#
+#     ./coco-dev              # interactive shell
+#     ./coco-dev make ...     # run a build
+#
+# The host already has lwasm/lwlink/lwar/os9 installed, and scripts/os9root.sh
+# prefers them because they are far faster than a container round trip. This
+# wrapper is the fallback for a machine without them, and the way to reach the
+# tools the host lacks (cmoc, the image's own mame).
+#
+# Both this project and the NitrOS-9 sources it builds from are mounted, since
+# the OS-9 root is assembled out of ../nitros9. Paths are mounted at the same
+# location they have on the host so a path printed inside the container still
+# means something outside it.
+#
+# `docker run -t` fails in a non-TTY (agent / CI) shell, so the TTY flag is
+# added only when stdin and stdout really are terminals.
+set -euo pipefail
+
+IMAGE="${COCO_DEV_IMAGE:-jamieleecho/coco-dev:0.85}"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NITROS9DIR="${NITROS9DIR:-$(cd "$PROJECT_DIR/../nitros9" && pwd)}"
+OS9ROOT="${OS9ROOT:-$HOME/OS9}"
+
+docker_flags=(--rm -i)
+if [ -t 0 ] && [ -t 1 ]; then
+  docker_flags+=(-t)
+fi
+
+mkdir -p "$OS9ROOT"
+
+if [ "$#" -eq 0 ]; then
+  set -- bash
+fi
+
+exec docker run "${docker_flags[@]}" \
+  -v "${PROJECT_DIR}:${PROJECT_DIR}" \
+  -v "${NITROS9DIR}:${NITROS9DIR}" \
+  -v "${OS9ROOT}:${OS9ROOT}" \
+  -e "NITROS9DIR=${NITROS9DIR}" \
+  -e "OS9ROOT=${OS9ROOT}" \
+  -w "${PROJECT_DIR}" \
+  "${IMAGE}" "$@"
