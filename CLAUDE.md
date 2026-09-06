@@ -71,6 +71,22 @@ copied across unchanged reaches the compiler as one enormous line.
 `scripts/os9root.sh` converts them, the same way NitrOS-9's own makefiles do
 with `os9 copy -l`.
 
+### The screen is never wider than 80 columns
+
+`dir`, `procs` and `mdir` ask the terminal for its width before they format,
+and we answer from `TIOCGWINSZ` — but never with more than 80, whatever the
+host window says. No OS-9 terminal was wider, and the utilities take that as
+given. `dir` builds its line in a buffer and then writes a fixed 80 bytes of
+it, so a wider answer makes it **drop every name past the eightieth column**,
+silently, because those names are never written at all. Its own check for the
+buffer filling up cannot save it: `cmpx #$0090` compares an absolute address,
+which only lands on the end of the buffer for a process whose data area is at
+$0000, and ours are at $0400.
+
+The symptom is a listing that is simply missing files, which looks exactly
+like a directory bug and is not. `--cols N` reports a width of your choosing —
+still capped — so the layout can be tested without a terminal.
+
 ### fork() and stdio
 
 `F$Fork` is a real `fork()`; the whole machine is copied and the child loads

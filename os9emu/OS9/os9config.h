@@ -20,6 +20,7 @@ struct os9config {
     const char *execdir;	// initial OS9 execution directory
     int         trace;		// trace system calls to stderr
     int         eol;		// one of EOL_*
+    int         cols;		// screen width to report, or 0 to ask the terminal
 };
 
 extern os9config os9cfg;
