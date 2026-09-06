@@ -98,6 +98,7 @@ os9emu --mem 32k basic09          # Basic09 wants a real workspace
 os9emu cc1 hello.c                # compile; the result lands in CMDS/
 os9emu -d dir                     # trace system calls; -dd adds reads/writes
 os9emu --eol crlf list file.txt   # readable line endings when piping
+os9emu --cols 40 --rows 16 dir    # a screen of your choosing, not the host's
 os9emu --root /path/to/os9        # a different OS-9 root ($OS9ROOT, else ~/OS9)
 ```
 

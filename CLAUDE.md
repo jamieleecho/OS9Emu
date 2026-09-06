@@ -134,6 +134,20 @@ The symptom is a listing that is simply missing files, which looks exactly
 like a directory bug and is not. `--cols N` reports a width of your choosing —
 still capped — so the layout can be tested without a terminal.
 
+The height is not capped, because nothing depends on it the way `dir` depends
+on the width: it is the page length, `PD.PAG`, and a program that pages its
+output simply pauses less often. It is asked for the same way, though, and
+`--rows N` states it.
+
+That size has to be *stated* in a test. A case's standard input is whatever
+ran the suite, so a program that reports on it — `tmode` with no argument
+prints the page length out of standard input's path options — otherwise
+answers with the size of the window `make test` was typed in, and the golden
+file records that. `tests/run.sh` therefore hands every case `--cols 80
+--rows 24`, and a case that wants something else passes its own afterwards,
+which wins. The `utils` case failed for exactly this reason on a 48-line
+terminal: `pag=30` where the golden said `pag=18`.
+
 ### dir -e asks for a descriptor by its number
 
 `dir -e` does not open a file to describe it. It has the sector number out of

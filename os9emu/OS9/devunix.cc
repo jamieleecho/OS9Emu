@@ -1657,22 +1657,33 @@ int fdterm::seek(int offset)
 #define MAXCOLS 80
 
 /*
+ * The screen an OS-9 terminal was, when nothing better is known. 24 lines is
+ * what OS-9 puts in PD.PAG for a new path.
+ */
+#define DEFROWS 24
+
+/*
  * How wide and tall the terminal is. A program that formats in columns -- dir,
- * procs, mdir -- asks before it prints. Ask the real terminal if there is one,
- * otherwise answer with the size OS-9 assumed.
+ * procs, mdir -- asks before it prints, and one that pages its output asks how
+ * tall. Ask the real terminal if there is one, otherwise answer with the size
+ * OS-9 assumed; --cols and --rows override either of those, independently, so
+ * a test does not have to be run in a window of the right shape.
  */
 static void term_size(FILE *fp, int *cols, int *rows)
 {
     struct winsize ws;
 
     *cols = MAXCOLS;
-    *rows = 24;
-    if(os9cfg.cols > 0)
-        *cols = os9cfg.cols;
-    else if(fp && ioctl(fileno(fp), TIOCGWINSZ, &ws) == 0) {
+    *rows = DEFROWS;
+    if(fp && ioctl(fileno(fp), TIOCGWINSZ, &ws) == 0)
+    {
         if(ws.ws_col) *cols = ws.ws_col;
         if(ws.ws_row) *rows = ws.ws_row;
     }
+    if(os9cfg.cols > 0)
+        *cols = os9cfg.cols;
+    if(os9cfg.rows > 0)
+        *rows = os9cfg.rows;
     if(*cols > MAXCOLS)
         *cols = MAXCOLS;
 }

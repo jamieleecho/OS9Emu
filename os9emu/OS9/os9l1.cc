@@ -76,6 +76,9 @@ static void usage(FILE *out, int status)
 "  -c, --cols N        screen width to report to programs, instead of asking\n"
 "                      the terminal. Either way it is capped at 80: no OS-9\n"
 "                      terminal was wider and the utilities assume it\n"
+"      --rows N        screen height to report, instead of asking the\n"
+"                      terminal. It is the page length a program that pages\n"
+"                      its output reads out of the path options\n"
 "  -V, --version       print the version and exit\n"
 "  -h, --help          print this message and exit\n"
 "\n"
@@ -108,6 +111,7 @@ int main(int argc, char *argv[])
             !strcmp(a, "-x") || !strcmp(a, "--execdir") ||
             !strcmp(a, "-e") || !strcmp(a, "--eol") ||
             !strcmp(a, "-c") || !strcmp(a, "--cols") ||
+            !strcmp(a, "--rows") ||
             !strcmp(a, "-m") || !strcmp(a, "--mem")) {
             if (argi + 1 >= argc) {
                 fprintf(stderr, "os9emu: %s needs a value\n", a);
@@ -146,15 +150,21 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
         }
-        else if (!strcmp(a, "-c") || !strcmp(a, "--cols")) {
+        else if (!strcmp(a, "-c") || !strcmp(a, "--cols") ||
+                 !strcmp(a, "--rows")) {
             char *end;
             long n = strtol(val, &end, 0);
+            int rows = !strcmp(a, "--rows");
 
             if (end == val || *end != '\0' || n <= 0) {
-                fprintf(stderr, "os9emu: --cols wants a column count\n");
+                fprintf(stderr, "os9emu: %s wants a %s count\n",
+                        a, rows ? "line" : "column");
                 return EXIT_FAILURE;
             }
-            os9cfg.cols = (int)n;
+            if (rows)
+                os9cfg.rows = (int)n;
+            else
+                os9cfg.cols = (int)n;
         }
         else if (!strcmp(a, "--debug"))
             os9cfg.trace++;
