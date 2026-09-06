@@ -77,18 +77,30 @@ what "pwd and pxd print only the device name" used to mean.
 
 `dir` seeks straight past both entries, so it never noticed either way.
 
-### Dots are components, not characters
+### Dots are components, and a run of them counts
 
-`.` is this directory and `..` is the parent, and only when they are a whole
-component: `.profile`, `a.b` and `...` are names. `canonicalizePath` used to
-work by counting dots as it went, which got all of it wrong — `/dd/T1/..`
-came back as `/dd/T1`, so `chd ..` stayed where it was and `dir T1/..` listed
-`T1`; `/dd/./T1` kept its dot; and a `.` inside a name after any earlier
-hidden name ate a whole directory component.
+A component of nothing but dots goes up one level for every dot after the
+first: `.` stays put, `..` is the parent, `...` the grandparent, `....` its
+parent, for as long as the run goes on. It is how a shell walks a path back
+up without a call for it — shellplus carries a forty-character string of dots
+and points further back into it at each step (`L1732`, used by `CmdPWD` in
+`../nitros9/level1/cmds/shellplus.asm`), and RBF counts the run and rewrites
+it (`GtDvcNam` in `../nitros9/level1/modules/rbf.asm`). Reading three dots as
+a name, which we used to, let one level of shellplus's prompt work and not
+two, so its prompt stopped dead after a `chd` two directories down. A file
+actually named `...` is unreachable, here as on a real system.
 
-`..` stops at the mount point, so no path walks out of the OS-9 disk and into
-the rest of the host filesystem, and the root comes out as its own parent —
-which is what OS-9 does and what `pwd` needs to know when to stop.
+The rule is about a component that is *nothing but* dots, not about what one
+starts with: `.profile`, `a.b` and `..hidden` are names.
+
+`canonicalizePath` used to work by counting dots as it went, which got all of
+it wrong — `/dd/T1/..` came back as `/dd/T1`, so `chd ..` stayed where it was
+and `dir T1/..` listed `T1`; `/dd/./T1` kept its dot; and a `.` inside a name
+after any earlier hidden name ate a whole directory component.
+
+The run stops at the mount point, so no path walks out of the OS-9 disk and
+into the rest of the host filesystem, and the root comes out as its own parent
+— which is what OS-9 does and what `pwd` needs to know when to stop.
 
 `I$ChgDir` resolves the dots before it stores the name. Keeping `/h0/T1/..`
 as it stood left the working directory a component longer after every `chd`.
@@ -223,7 +235,7 @@ which is the ground the C runtime's `sbrk` allocates out of. The C compiler
 died in `c.prep` with "grab overlap", which looks like a memory-layout bug and
 is a register convention.
 
-### The module directory is per process
+### The module directory is shared; the module memory is not
 
 `F$Load` really loads: it places the module at the top of memory, growing
 downwards, and records it so `F$Link` can find it again. Reporting the header
@@ -240,12 +252,40 @@ the module area grew by one command for every command run, until it came down
 to meet the shell's own data and the C compiler stopped three passes in with
 "process memory full".
 
-The directory belongs to the process that built it, though. Each OS-9 process
-here is a host process with its own copy of memory, so a module `load`ed by
-one is invisible to the next: `load`, `link` and `mdir` work within a program
-but not across the shell's commands. A system-wide directory would need the
-module area in shared memory, which the single 64K array the CPU runs on does
-not lend itself to. See issue #1.
+Real OS-9 keeps one directory for the whole machine, and `load`, `link`,
+`unlink` and `mdir` are written to it: `load echo` is meant to leave `echo`
+there for the next command to find, and it is a different process that goes
+looking. Each OS-9 process here is a host process with its own copy of the
+emulated 64K, so a directory kept in that memory used to die with whoever
+built it — issue #1.
+
+What is shared is **the directory, not the module memory**. An OS-9 module is
+position-independent and re-entrant by rule, so a process that links a module
+another process loaded can read it in again at an address of its own choosing
+and be no worse off; only the name, the pathlist it came from and the link
+count have to be held in common. That fits in a `MAP_SHARED` page created
+before the first fork and inherited by every process after it, and it leaves
+each process's 64K alone — no window carved out of the address space, and no
+ceiling on anybody's data area, which is what mapping the module *area* would
+have cost.
+
+The link count is the machine's, so `F$UnLink` and `F$UnLoad` decrement that
+one and give the local copy back when it reaches zero — not when this
+process's own tally does. `unlink` links the module to find it and then
+unlinks twice, so the second `F$UnLink` has to be the one that counts; with a
+per-process tally the first had already taken the entry away and the second
+found nothing to do, and a module could never be unloaded at all.
+
+It is one emulator's directory, not the host's. The page is made when
+`os9emu` starts and inherited by everything it forks, so `os9emu load echo`
+and `os9emu link echo` typed separately at a host shell are two machines and
+share nothing — which is what they are. Inside one `os9emu shell` they are
+the same machine, and that is the case #1 is about.
+
+What this does not give is a module whose *contents* are shared, which is what
+`F$DatMod` would need: a data module has to be writable by everyone linked to
+it, and that wants real shared pages. `mdir` needs `F$GModDr` before it can
+show any of this, and `printerr` needs the same.
 
 ### A new process gets a cleared data area
 
@@ -261,11 +301,17 @@ non-mapping calls report a size, not an address".)
 every caller that advanced X by the amount consumed was left one character
 short — `runb counter` parsed `counte` and complained about the `r`.
 
-`F$Link` is the other way round: when it cannot find the module it hands the
-caller back the X it was given, untouched. Level 1's `FLink` only writes `R$X`
-on the way out *with* a module, and the shell relies on that — when a link
-fails it opens the name from wherever X now points, so anything the call
+`F$Link` cuts both ways. When it *finds* the module it hands X back past the
+name — "the address of the last byte of the module name, plus 1" — and `link
+a b c` walks its parameter line by the X that comes back, so with X left where
+it started it linked the first name for ever. When it cannot find the module
+it hands back the X it was given, untouched: Level 1's `FLink` only writes
+`R$X` on the way out *with* a module, and the shell relies on that — when a
+link fails it opens the name from wherever X now points, so anything the call
 consumed is lost to it.
+
+Nothing showed the first half until the module directory was shared, because
+until then a link from the shell's own children never succeeded.
 
 `F$PrsNam` consumes the leading `/`. Leaving X where it put it therefore made
 `/dd/BIN/prog` arrive at the shell's `I$Open` as a relative `dd/BIN/prog`,
@@ -425,7 +471,7 @@ what "unknown service calls must not be fatal" bought.
 `level1/cmds`, and only fourteen sources differ, so a Level 2 root is a small
 delta from a Level 1 one. 101 modules against 93.
 
-### The Level 2 shell, and what is left after it
+### The Level 2 shell, and what it took
 
 `CMDS/shell` in the Level 2 port is not one module but nine merged:
 `shellplus` and the `date`, `deiniz`, `echo`, `iniz`, `link`, `load`, `save`
@@ -442,18 +488,11 @@ is per-process anyway (#1). Real `F$Load` loads every module in the file.
 
 With the non-mapping calls reporting `M$Mem` and `F$UnLoad` releasing what it
 is given, the Level 2 shell forks exactly the page counts the Level 1 shell
-does, and the C compiler runs on a Level 2 root. `make test-l2` is 18 of 19.
+does, and the C compiler runs on a Level 2 root.
 
-The one case left is `dots`, and it is a real gap rather than a Level 2 one.
-shellplus builds the directory in its prompt by walking up with a **run of
-dots** — it carries a forty-character string of them and points further back
-into it for each level (`L1732` in `../nitros9/level1/cmds/shellplus.asm`) —
-so the grandparent is `...` and not `../..`. We treat a run of three or more
-dots as a name, which is what the OS-9 pathlist rules say it is not: `.` is
-this directory and each dot after the first goes up one more level. RBF counts
-them and rewrites (`GtDvcNam` in `../nitros9/level1/modules/rbf.asm`). One
-level of prompt works and two do not, which is why the case fails only after
-a `chd` two deep.
+With runs of dots reading as the pathlist components they are — the last
+thing shellplus needed, for the directory in its prompt — it is 19 of 19, the
+same as Level 1. See "dots are components, and a run of them counts".
 
 `tests/cases/shell.t`, `dots.t` and `progpath.t` fold the shell's identity
 away, so the same golden files serve either root: shellplus writes the first
@@ -474,13 +513,12 @@ serve. They are also the least interesting commands in the set.
   carries `S$Kill` and `S$Wake` between processes. No other code travels: each
   OS-9 process here is a host process, and a host signal cannot bring the code
   with it.
-- `load`, `link`, `mdir` and `printerr` only see modules the running program
-  loaded itself — see "the module directory is per process" above, and #1.
+- `mdir` and `printerr` want `F$GModDr`, which answers with a copy of the
+  module directory laid out the way a real Level 2 kernel holds it. The
+  directory itself is shared now — see "the module directory is shared; the
+  module memory is not" — so `load`, `link` and `unlink` work across
+  processes, but nothing yet reads it back out. Neither does `F$DatMod`.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
   `tsmon`, `edit` — sit waiting for input the test harness never sends.
-- A run of three or more dots is a pathlist component that goes up that many
-  levels less one, and we read it as a name. The Level 2 shell builds the
-  directory in its prompt that way, so its prompt stops working two levels
-  down — see "Level 2" above.

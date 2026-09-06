@@ -147,15 +147,16 @@ static char *findpath(char *path, size_t rootlen, bool mustexist)
 }
 
 /*
- * Resolve "." and ".." out of a path, in place when dst == path.
+ * Resolve a path's dot components, in place when dst == path.
  *
- * A component of exactly "." goes away and ".." takes the component before it
- * with it. Everything else is a name, dots and all: ".profile", "a.b" and
- * "..." name files and are copied across untouched. Repeated slashes collapse
- * and a trailing slash is dropped.
+ * A component of nothing but dots goes up one level for every dot after the
+ * first: "." stays put, ".." is the parent, "..." the grandparent, and so on
+ * for as long as the run continues. Everything else is a name, dots and all:
+ * ".profile", "a.b" and "..hidden" are copied across untouched. Repeated
+ * slashes collapse and a trailing slash is dropped.
  *
- * The first rootlen characters are kept verbatim and ".." never climbs above
- * them. For a host path that is the mount point -- so no amount of ".." walks
+ * The first rootlen characters are kept verbatim and no run of dots ever
+ * climbs above them. For a host path that is the mount point -- so no amount of ".." walks
  * out of the OS9 disk and into the rest of the filesystem -- and for an OS9
  * path it is the device name. The root of an OS9 disk is its own parent,
  * which is what OS9 itself does.
@@ -164,10 +165,10 @@ static char *findpath(char *path, size_t rootlen, bool mustexist)
  * this has to put in when rootlen does not end at one, so dstsize is here to
  * bound that rather than because a real path ever needs it.
  *
- * Doing this by counting dots, as this used to, mistakes every one of those
- * cases: "/dd/T1/.." came back as "/dd/T1", so "chd .." stayed where it was
- * and "dir T1/.." listed T1; "/dd/./T1" was left with the dot still in it;
- * and a name with a dot in it after any earlier hidden name lost a whole
+ * Doing this by counting dots as it went, as this used to, mistakes every one
+ * of those cases: "/dd/T1/.." came back as "/dd/T1", so "chd .." stayed where
+ * it was and "dir T1/.." listed T1; "/dd/./T1" was left with the dot still in
+ * it; and a name with a dot in it after any earlier hidden name lost a whole
  * directory component.
  */
 void canonicalizePath(char *dst, const char *path, size_t rootlen,
@@ -203,7 +204,7 @@ void canonicalizePath(char *dst, const char *path, size_t rootlen,
     while(*p)
     {
         const char *seg = p;
-        size_t seglen;
+        size_t seglen, dots;
 
         while(*p && *p != '/')
             p++;
@@ -213,24 +214,56 @@ void canonicalizePath(char *dst, const char *path, size_t rootlen,
 
         if(seglen == 0)			// a run of slashes, or a trailing one
             continue;
-        if(seglen == 1 && seg[0] == '.')
-            continue;
 
-        if(seglen == 2 && seg[0] == '.' && seg[1] == '.')
+        /*
+         * A component of nothing but dots is not a name. One dot is this
+         * directory and every dot after the first goes up another level, so
+         * ".." is the parent, "..." the grandparent, and so on -- which is
+         * how a shell walks a path back up: shellplus carries a string of
+         * forty of them and points further into it at each step. Anything
+         * with a character among the dots is a name: ".profile", "a.b",
+         * "..hidden".
+         */
+        dots = 0;
+        while(dots < seglen && seg[dots] == '.')
+            dots++;
+
+        if(dots == seglen)
         {
-            if(out > floor)
+            size_t up;
+
+            for(up = seglen - 1; up > 0; up--)
             {
-                // Back over the last component and the slash in front of it
-                while(out > floor && dst[out-1] != '/')
-                    out--;
                 if(out > floor)
-                    out--;
-                continue;
+                {
+                    // Back over the last component and the slash before it
+                    while(out > floor && dst[out-1] != '/')
+                        out--;
+                    if(out > floor)
+                        out--;
+                    continue;
+                }
+                if(rooted)
+                    break;	// at the root: it is its own parent
+
+                /*
+                 * A relative path may genuinely start above where it stands.
+                 * Keep one ".." for each level we cannot resolve, and put the
+                 * floor above it so nothing later backs over it.
+                 */
+                if(out > 0 && dst[out-1] != '/')
+                {
+                    if(out + 1 > dstsize - 1)
+                        break;
+                    dst[out++] = '/';
+                }
+                if(out + 2 > dstsize - 1)
+                    break;
+                dst[out++] = '.';
+                dst[out++] = '.';
+                floor = out;
             }
-            if(rooted)
-                continue;	// at the root: it is its own parent
-            // A relative path may genuinely start with "..", and what we keep
-            // here nothing later may back over.
+            continue;
         }
 
         if(out > 0 && dst[out-1] != '/')
@@ -243,8 +276,6 @@ void canonicalizePath(char *dst, const char *path, size_t rootlen,
             break;
         memmove(dst + out, seg, seglen);
         out += seglen;
-        if(seglen == 2 && seg[0] == '.' && seg[1] == '.')
-            floor = out;
     }
 
     if(out == 0 && len > 0 && dstsize > 1)
