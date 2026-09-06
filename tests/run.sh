@@ -8,7 +8,9 @@
 #     tests/run.sh -v dir          # show the output even when it passes
 #
 # A case is tests/cases/NAME.t, a bash fragment that prints to stdout, paired
-# with NAME.out holding what it should print. The fragment gets:
+# with NAME.out holding what it should print -- or with NAME.2.out when the
+# root was built at Level 2 and that case prints something else there. The
+# fragment gets:
 #
 #     $OS9 <module> [args]   run a module under the emulator
 #     $WORK                  a scratch directory, already the OS-9 data area
@@ -26,6 +28,14 @@ PROJECT_DIR="$(dirname "$TESTDIR")"
 OS9EMU="${OS9EMU:-$PROJECT_DIR/build/os9emu}"
 OS9ROOT="${OS9ROOT:-$HOME/OS9}"
 TIMEOUT="${TIMEOUT:-20}"
+
+# Which level the root was built from, as scripts/os9root.sh left it. A case
+# whose output differs between the two puts the Level 2 answer in NAME.2.out
+# and the Level 1 answer in NAME.out -- most do not, because most of the
+# command set is the same sources either way.
+LEVEL=1
+[ -f "$OS9ROOT/.level" ] && LEVEL="$(cat "$OS9ROOT/.level")"
+export LEVEL
 
 update=0
 verbose=0
@@ -59,6 +69,7 @@ pass=0; fail=0; failed=()
 for name in "${names[@]}"; do
   case_file="$TESTDIR/cases/$name.t"
   want_file="$TESTDIR/cases/$name.out"
+  [ -f "$TESTDIR/cases/$name.$LEVEL.out" ] && want_file="$TESTDIR/cases/$name.$LEVEL.out"
   if [ ! -f "$case_file" ]; then
     echo "no such test: $name" >&2; fail=$((fail+1)); failed+=("$name"); continue
   fi

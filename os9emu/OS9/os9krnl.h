@@ -81,6 +81,8 @@ private:
     void i_chgdir();
     void f_cmpnam();
     void f_cpymem();
+    void f_gmoddr();
+    int  module_bytes(const char *path, long off, Byte *dst, int count);
     void f_crc();
     void f_fork();
     void f_send();
