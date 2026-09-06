@@ -1,0 +1,18 @@
+--- absolute
+absolute
+--- relative with /
+relative
+--- ./name
+dotslash
+--- plain module name
+plain
+--- not there anywhere
+ERROR #216 - Path Name Not Found
+ rc=1
+--- bare name in the working directory
+ERROR #216 - Path Name Not Found
+ rc=1
+--- the same one, named as a path
+path
+--- absolute, from the shell
+fromshell

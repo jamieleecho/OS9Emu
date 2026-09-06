@@ -174,9 +174,35 @@ fork it still holds the parent's variables — the shell read an uninitialised
 every caller that advanced X by the amount consumed was left one character
 short — `runb counter` parsed `counte` and complained about the `r`.
 
-`F$Link` is the other way round: it leaves X where `F$PrsNam` put it, at the
-start of the name. The shell reads X back to open the command it just failed
-to link, so advancing past the name loses the name.
+`F$Link` is the other way round: when it cannot find the module it hands the
+caller back the X it was given, untouched. Level 1's `FLink` only writes `R$X`
+on the way out *with* a module, and the shell relies on that — when a link
+fails it opens the name from wherever X now points, so anything the call
+consumed is lost to it.
+
+`F$PrsNam` consumes the leading `/`. Leaving X where it put it therefore made
+`/dd/BIN/prog` arrive at the shell's `I$Open` as a relative `dd/BIN/prog`,
+which got the execution directory pasted in front of it — so the shell could
+not run a program by an absolute pathname at all. It looked instead as though
+`cxd` were being consulted for something that was plainly not relative.
+
+### Where a program is looked for
+
+OS-9 looks in the execution directory and nowhere else: `F$Load` opens with
+`EXEC.` set, and ioman starts a relative pathlist from the execution directory
+whenever that bit is on (`L0349` in `../nitros9/level1/modules/ioman.asm`).
+So `BIN/prog` typed at an OS-9 shell really does mean `<cxd>/BIN/prog`, and
+`i_open` passing `(a & 4)` to `getpath` is faithful. When the open misses, the
+shell falls back to opening the name as a shell procedure — which is why
+naming a module by a path it cannot reach ends in the binary being read as a
+script rather than in a clean error.
+
+A bare name is a module name and gets exactly that treatment: `os9emu echo`
+finds the `echo` in `CMDS` and nothing else, however many other files of that
+name are lying about. A name with a `/` in it is a pathname, though, and
+`./prog` typed at a host shell means the prog here — we are the thing being
+typed at, and we have no procedure file to fall back on, so `loadmodule` tries
+the working directory after the execution one for those.
 
 ### Install the shell NitrOS-9 builds
 
@@ -282,10 +308,6 @@ scaled down — the proportions are right, the absolute numbers cannot be.
   have nothing to wake, since a sleeping process is inside `nanosleep`.
 - `load`, `link`, `mdir` and `printerr` only see modules the running program
   loaded itself — see "the module directory is per process" above, and #1.
-- A program cannot be named by a pathname: `F$Link` moves the caller's X past
-  the leading `/`, so the shell prefixes `cxd` to an absolute path and then
-  runs the module as a shell procedure, and our own command line only ever
-  looks under `cxd`. #7.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
