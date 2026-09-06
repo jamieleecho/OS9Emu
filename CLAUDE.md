@@ -300,6 +300,9 @@ What this does not give is a module whose *contents* are shared, which is what
 `F$DatMod` would need: a data module has to be writable by everyone linked to
 it, and that wants real shared pages.
 
+The directory holds the program each process is running as well as everything
+`load` put there — see "a running program is a resident module".
+
 ### The directory a Level 2 utility is handed is a copy
 
 Sharing the table is half of it. The other half is that nothing could read it
@@ -335,6 +338,28 @@ the module header, both of which mean the modules have to be resident in the
 process that is asking. Ours are not — a forked `mdir` has loaded nothing —
 so on a Level 1 root it still prints a heading over nothing, and that is not
 something `F$GModDr` can fix.
+
+### A running program is a resident module
+
+A real kernel puts the program in the module directory when it loads it and
+takes the link back when the process ends, so the program a process is running
+is a resident module like any other. `mdir` lists it, two processes running
+the same program share one entry with a use count of two, and **a program can
+link itself** — which `printerr` does, to stay resident after it exits.
+
+Ours does the same: `loadmodule` adds the entry the directory would have made
+for a `load`, with this process holding one of its links, and the link goes
+back at exit. A process that is killed instead leaves it behind, so the reap
+that drops a dead row releases its module too.
+
+`F$Chain` comes back through `loadmodule`, so whatever the process was running
+before is released first.
+
+The program is not put in the *local* directory, though — the one `modtop` is
+computed from. It sits at `STARTPROG`, which is address 0, and an entry there
+would drag `modtop` down to nothing and leave no room for a module at all. A
+process that links its own name therefore reads a second copy in at the top of
+memory, which costs a little space and is otherwise the same module.
 
 ### A module file may hold more than one module
 
@@ -387,9 +412,11 @@ programs processes are running, not the room left in anybody's 64K — those
 are separate things here in a way they are not on a real machine.
 
 `printerr` is not waiting on this call at all. It links itself an extra time
-to stay resident and then installs its own `F$PErr` into the system service
-table with `F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG` — a
-6809 routine running kernel-side, which is a different thing to want.
+to stay resident — which works now that a running program is in the directory
+— and then installs its own `F$PErr` into the system service table with
+`F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG`. That is a 6809
+routine running kernel-side, which is a different thing to want, and it is the
+only step still missing.
 
 ### A new process gets a cleared data area
 
@@ -618,8 +645,10 @@ and are not answered are:
 | `F$AllRAM`, `F$DelRAM`, `F$AlHRAM`, `F$SRqMem` | `grfdrv` | graphics memory |
 
 That is the whole list. `F$SSvc` is the only one with a plausible payoff:
-`printerr` links itself resident and installs its own `F$PErr`, so that error
-numbers come out of `/DD/SYS/ERRMSG` instead of the table we compile in.
+`printerr` links itself resident — which works now — and installs its own
+`F$PErr`, so that error numbers come out of `/DD/SYS/ERRMSG` instead of the
+table we compile in. It does not check whether the call worked: it does `clrb`
+after it either way, so it exits silently having installed nothing.
 
 **`F$DatMod` is not on the list, because nothing calls it.** NitrOS-9's kernel
 does not have the call at all — `3rdparty/p2mods/datmod.asm` adds it through
@@ -651,7 +680,8 @@ serve. They are also the least interesting commands in the set.
   with it.
 - `F$SSvc` would let `printerr` install its own `F$PErr` and read the error
   text out of `/DD/SYS/ERRMSG`. It is the only unanswered call with a caller
-  worth having; see "what is actually missing".
+  worth having; see "what is actually missing". `printerr` gets as far as the
+  call now, and exits silently without noticing that it failed.
 - `F$DatMod` wants a module whose contents are shared, which the shared
   directory deliberately does not give: what is shared is the fact of a
   module, not its bytes. Nothing in either root calls it.

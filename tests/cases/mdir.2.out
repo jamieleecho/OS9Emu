@@ -5,6 +5,8 @@
 
 Block Offset Size Typ Rev Attr  Use Module Name
 ----- ------ ---- --- --- ---- ---- ------------
+   2      0  1B57  11   0 r...    1 Shell
+   3      0   2ED  11   1 r...    1 MDir
 --- two modules, loaded by the commands before it
 
 
@@ -12,13 +14,15 @@ Block Offset Size Typ Rev Attr  Use Module Name
 
 Block Offset Size Typ Rev Attr  Use Module Name
 ----- ------ ---- --- --- ---- ---- ------------
+   2      0  1B57  11   0 r...    1 Shell
+   3      0   2ED  11   1 r...    1 MDir
    4      0    22  11   1 r...    1 Echo
    5      0   5BD  11   0 r...    1 Copy
 --- the names on their own
 
 
    Module Directory at HH:MM:SS
-Echo        Copy
+Shell       MDir        Echo        Copy
 --- and unlinked again
 
 
@@ -26,3 +30,5 @@ Echo        Copy
 
 Block Offset Size Typ Rev Attr  Use Module Name
 ----- ------ ---- --- --- ---- ---- ------------
+   2      0  1B57  11   0 r...    1 Shell
+   3      0   2ED  11   1 r...    1 MDir
