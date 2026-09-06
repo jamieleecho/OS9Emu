@@ -300,6 +300,9 @@ What this does not give is a module whose *contents* are shared, which is what
 `F$DatMod` would need: a data module has to be writable by everyone linked to
 it, and that wants real shared pages.
 
+The directory holds the program each process is running as well as everything
+`load` put there — see "a running program is a resident module".
+
 ### The directory a Level 2 utility is handed is a copy
 
 Sharing the table is half of it. The other half is that nothing could read it
@@ -335,6 +338,28 @@ the module header, both of which mean the modules have to be resident in the
 process that is asking. Ours are not — a forked `mdir` has loaded nothing —
 so on a Level 1 root it still prints a heading over nothing, and that is not
 something `F$GModDr` can fix.
+
+### A running program is a resident module
+
+A real kernel puts the program in the module directory when it loads it and
+takes the link back when the process ends, so the program a process is running
+is a resident module like any other. `mdir` lists it, two processes running
+the same program share one entry with a use count of two, and **a program can
+link itself** — which `printerr` does, to stay resident after it exits.
+
+Ours does the same: `loadmodule` adds the entry the directory would have made
+for a `load`, with this process holding one of its links, and the link goes
+back at exit. A process that is killed instead leaves it behind, so the reap
+that drops a dead row releases its module too.
+
+`F$Chain` comes back through `loadmodule`, so whatever the process was running
+before is released first.
+
+The program is not put in the *local* directory, though — the one `modtop` is
+computed from. It sits at `STARTPROG`, which is address 0, and an entry there
+would drag `modtop` down to nothing and leave no room for a module at all. A
+process that links its own name therefore reads a second copy in at the top of
+memory, which costs a little space and is otherwise the same module.
 
 ### A module file may hold more than one module
 
@@ -387,9 +412,11 @@ programs processes are running, not the room left in anybody's 64K — those
 are separate things here in a way they are not on a real machine.
 
 `printerr` is not waiting on this call at all. It links itself an extra time
-to stay resident and then installs its own `F$PErr` into the system service
-table with `F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG` — a
-6809 routine running kernel-side, which is a different thing to want.
+to stay resident — which works now that a running program is in the directory
+— and then installs its own `F$PErr` into the system service table with
+`F$SSvc`, so that error numbers come out of `/DD/SYS/ERRMSG`. That is a 6809
+routine running kernel-side, which is a different thing to want, and it is the
+only step still missing.
 
 ### A new process gets a cleared data area
 
@@ -603,6 +630,40 @@ away, so the same golden files serve either root: shellplus writes the first
 half of its banner to standard *output* and prompts `{term|01}/dd:` where
 `shell_21` prompts `OS9:`, and the case is about what the shell does.
 
+### What is actually missing, and what F$DatMod would cost
+
+Every OS-9 system call a module makes is a `10 3F xx`, so the command set can
+simply be asked which ones it uses. Across both roots, the calls that reach us
+and are not answered are:
+
+| | who calls it | what it wants |
+|---|---|---|
+| `F$SSvc`  | `printerr`, `c.link` | install a 6809 routine as a system call |
+| `F$SLink` | `syscall`            | link a module in the system address space |
+| `F$AllBit`| `format`             | a disk image to allocate in |
+| `F$Debug` | `calldbg`            | the kernel debugger |
+| `F$AllRAM`, `F$DelRAM`, `F$AlHRAM`, `F$SRqMem` | `grfdrv` | graphics memory |
+
+That is the whole list. `F$SSvc` is the only one with a plausible payoff:
+`printerr` links itself resident — which works now — and installs its own
+`F$PErr`, so that error numbers come out of `/DD/SYS/ERRMSG` instead of the
+table we compile in. It does not check whether the call worked: it does `clrb`
+after it either way, so it exits silently having installed nothing.
+
+**`F$DatMod` is not on the list, because nothing calls it.** NitrOS-9's kernel
+does not have the call at all — `3rdparty/p2mods/datmod.asm` adds it through
+`F$SSvc` — and no module in either root is a data module: the only types
+present are Prgrm, Sbrtn and Systm.
+
+It would also be the expensive one. A data module has to be writable by
+everyone linked to it, so its pages have to be really shared, which means a
+`MAP_SHARED` window mapped into `memory` at a fixed address. Mapping is by
+host page, and that page is 16K on an Apple Silicon machine — so the smallest
+window that can exist takes **a quarter of the 64K address space** away from
+every process, permanently, and lowers the ceiling the module area grows down
+from. That is the cost the shared *directory* was designed to avoid, paid for
+a call with no caller.
+
 ### What to leave alone
 
 The ill-behaved end of Level 2 is a tidy set to ignore: `dmem`, `pmap`,
@@ -617,9 +678,13 @@ serve. They are also the least interesting commands in the set.
   carries `S$Kill` and `S$Wake` between processes. No other code travels: each
   OS-9 process here is a host process, and a host signal cannot bring the code
   with it.
+- `F$SSvc` would let `printerr` install its own `F$PErr` and read the error
+  text out of `/DD/SYS/ERRMSG`. It is the only unanswered call with a caller
+  worth having; see "what is actually missing". `printerr` gets as far as the
+  call now, and exits silently without noticing that it failed.
 - `F$DatMod` wants a module whose contents are shared, which the shared
   directory deliberately does not give: what is shared is the fact of a
-  module, not its bytes.
+  module, not its bytes. Nothing in either root calls it.
 - `format`, `dcheck` and `os9gen` want a disk image to work on, and `httpd`,
   `inetd`, `telnet` and `dw` want a network. Neither exists here.
 - Interactive programs that drive the terminal directly — `ded`, `minted`,
