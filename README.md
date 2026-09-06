@@ -76,6 +76,7 @@ compared without either disturbing the other:
 
 ```sh
 make os9root-l2      # builds the Level 2 "coco3" port into ~/OS9L2
+make test-l2         # the golden-output tests against it
 make survey-l2       # runs every command in it and reports how each fared
 ```
 

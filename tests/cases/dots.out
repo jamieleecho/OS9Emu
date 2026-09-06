@@ -5,7 +5,7 @@ DEEP
 --- SUB/DEEP/..
 DEEP
 --- SUB/./DEEP
-there.txt
+DEEPER there.txt
 --- .. of the root
 CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
 --- above the root
@@ -14,6 +14,24 @@ CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
 The quick brown fox
 jumps over the lazy dog
 third line here
+--- .
+bottom.txt
+--- .. is DEEP
+DEEPER there.txt
+--- ... is SUB
+DEEP
+--- .... is the root
+CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
+--- ..... climbs no further
+CMDS DATA DEFS hello.txt LIB SUB SYS words.txt
+--- ../.. says what ... says
+DEEP
+--- components follow a run of dots like any other
+The quick brown fox
+jumps over the lazy dog
+third line here
+--- a name that begins with dots
+begins with dots
 --- pwd walks the entries back up
 /dd/SUB/DEEP
 /dd/SUB
