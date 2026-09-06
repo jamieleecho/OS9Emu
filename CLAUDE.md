@@ -139,6 +139,14 @@ on the width: it is the page length, `PD.PAG`, and a program that pages its
 output simply pauses less often. It is asked for the same way, though, and
 `--rows N` states it.
 
+A case's output is bytes, not text. A program that goes wrong can put
+anything on its standard output -- one of the C-built utilities prints its own
+module header, `87 CD ...` -- and BSD `sed` answers a byte that is not valid
+in the locale with `RE error: illegal byte sequence` and *stops*, taking the
+rest of the case's output with it. The diff then shows a wholesale loss where
+the truth is one bad line. `tests/run.sh` runs its `sed` and `diff` under
+`LC_ALL=C` for that reason.
+
 That size has to be *stated* in a test. A case's standard input is whatever
 ran the suite, so a program that reports on it — `tmode` with no argument
 prints the page length out of standard input's path options — otherwise
