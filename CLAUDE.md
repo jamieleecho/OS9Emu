@@ -32,6 +32,32 @@ root — see "Level 2" below.
 
 Everything below cost real time to find.
 
+### The overflow flag is carry in xor carry out
+
+The 6809 core came from USim, and its 8-bit `ADD`/`ADC` set `V` to the carry
+*into* bit 7 alone -- the `cc.bit.v ^= cc.bit.c` that makes it the carry in
+xor the carry out was sitting in `mc6809in.cc` commented out. `ADDD` was
+right, because it derives both carries at once from `d^m^t^(t>>1)`: bit 15 of
+that is the carry into the top bit, and bit 15 of `t>>1` is bit 16 of `t`,
+which is the carry out. `SUB`, `SBC` and `CMP` use the same expression and
+were right too.
+
+So `V` was wrong exactly when a byte add carried out of bit 7, and the cost
+was Basic09's floating point. A Microware real is a mantissa in [0.5, 1) and
+an excess-128 exponent byte, so a multiply adds the two exponent bytes and
+tests `V` for range. `.4` has exponent $7F and `1.0` has $81: $7F + $81
+carries out of bit 7 and not into it, `V` came back 1, and the multiply took
+its overflow exit and answered zero. `.4*1.0` was `0`, and so was `.25*4.0`
+and `SIN(.1)` -- which reaches the same addition reducing a small argument,
+and flushed to zero where stock OS-9 prints `.099833417`.
+
+It is a quiet bug because most numbers miss it. `.1*1.0` ($7D + $81) does not
+carry at all and was always right, and `.6*1.0` ($80 + $81) carries out *and*
+in, so the old code's answer of 0 was the right one by accident. Only an
+operand in [0.25, 0.5) against one in [1, 2) -- and the other sums that land
+the same way -- went wrong, which is why `SQR`, `LOG` and integer arithmetic
+all looked fine. `tests/cases/basic09-math.t` is the case that pins it.
+
 ### Memory layout is not a detail
 
 A process gets `[lowermem, uppermem)` for data, with the parameter area at the
