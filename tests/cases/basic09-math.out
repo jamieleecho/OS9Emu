@@ -8,6 +8,9 @@ sqr2:   1.41421356
 mul1:   .4
 mul2:   1.
 mul3:   .8
+mul4:   .4
+hang:   .01
+prec:   .06
 pow:    .01
 int:    1.
 Ready

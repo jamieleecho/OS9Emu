@@ -36,27 +36,34 @@ Everything below cost real time to find.
 
 The 6809 core came from USim, and its 8-bit `ADD`/`ADC` set `V` to the carry
 *into* bit 7 alone -- the `cc.bit.v ^= cc.bit.c` that makes it the carry in
-xor the carry out was sitting in `mc6809in.cc` commented out. `ADDD` was
-right, because it derives both carries at once from `d^m^t^(t>>1)`: bit 15 of
-that is the carry into the top bit, and bit 15 of `t>>1` is bit 16 of `t`,
-which is the carry out. `SUB`, `SBC` and `CMP` use the same expression and
-were right too.
+xor the carry out was sitting in `mc6809in.cc` commented out. The true `V` is
+the two xored, so **`V` was wrong exactly when a byte add carried out of bit
+7**, whatever went on below it.
 
-So `V` was wrong exactly when a byte add carried out of bit 7, and the cost
-was Basic09's floating point. A Microware real is a mantissa in [0.5, 1) and
-an excess-128 exponent byte, so a multiply adds the two exponent bytes and
-tests `V` for range. `.4` has exponent $7F and `1.0` has $81: $7F + $81
-carries out of bit 7 and not into it, `V` came back 1, and the multiply took
-its overflow exit and answered zero. `.4*1.0` was `0`, and so was `.25*4.0`
-and `SIN(.1)` -- which reaches the same addition reducing a small argument,
-and flushed to zero where stock OS-9 prints `.099833417`.
+`V` is not read only by `BVS` and `BVC`. It is half of every *signed* branch
+-- `BGE`, `BGT`, `BLE` and `BLT` all test `N^V` -- so a wrong `V` sends any of
+those the wrong way, in code that never mentions overflow.
 
-It is a quiet bug because most numbers miss it. `.1*1.0` ($7D + $81) does not
-carry at all and was always right, and `.6*1.0` ($80 + $81) carries out *and*
-in, so the old code's answer of 0 was the right one by accident. Only an
-operand in [0.25, 0.5) against one in [1, 2) -- and the other sums that land
-the same way -- went wrong, which is why `SQR`, `LOG` and integer arithmetic
-all looked fine. `tests/cases/basic09-math.t` is the case that pins it.
+That is Basic09's floating point, which adds bytes of both halves of a real:
+a mantissa in [0.5, 1) and an excess-128 exponent byte. Of a 12x12 grid of
+products, 54 were wrong before the fix, in three shapes. Most answered `0` --
+`.4*1.0`, `.3*2.0`. Two lost precision instead: `.1*.6` gave `.00` where the
+product is `.06`. Sixteen **never returned at all** -- `.1*.1` hangs, a loop
+whose exit branch was the one being misread. `SIN`, `COS` and `ATN` reach the
+same code for a small argument, and `SIN(.1)` flushed to zero where stock
+OS-9 prints `.099833417`.
+
+Which products went wrong is not a tidy interval, and it is not the exponent
+sum alone. `.1*1.0` was always right where `.1*4.0` was zero, though the
+mantissas are the same; `.1*.8` was right where `.1*.6` was not, though the
+exponent bytes are the same. Do not try to predict it from the value --
+`tests/cases/basic09-math.t` pins the answers instead.
+
+`ADDD` was already right, because it derives both carries at once from
+`d^m^t^(t>>1)`: bit 15 of that is the carry into the top bit, and bit 15 of
+`t>>1` is bit 16 of `t`, which is the carry out. `SUB`, `SBC` and `CMP` use
+the same expression. The stale commented line goes from `addd` rather than
+being enabled, which would have counted the carry twice.
 
 ### Memory layout is not a detail
 
