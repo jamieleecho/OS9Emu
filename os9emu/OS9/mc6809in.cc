@@ -34,7 +34,7 @@ void mc6809::help_adc(Byte& x)
         x = t & 0xff;
     }
     
-    //	cc.bit.v ^= cc.bit.c;
+    cc.bit.v ^= cc.bit.c;		// Overflow is carry in xor carry out
     cc.bit.n = btst(x, 7);
     cc.bit.z = !x;
 }
@@ -69,7 +69,7 @@ void mc6809::help_add(Byte& x)
         x = t & 0xff;
     }
     
-    //	cc.bit.v ^= cc.bit.c;
+    cc.bit.v ^= cc.bit.c;		// Overflow is carry in xor carry out
     cc.bit.n = btst(x, 7);
     cc.bit.z = !x;
 }
@@ -95,7 +95,6 @@ void mc6809::addd(void)
         d = (Word)(t & 0xffff);
     }
     
-    //	cc.bit.v ^= cc.bit.c;
     cc.bit.n = btst(d, 15);
     cc.bit.z = !d;
 }
